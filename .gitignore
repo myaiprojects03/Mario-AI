@@ -1,0 +1,34 @@
+# Environment and Secrets
+.env
+*.env
+
+# Data Files
+data/
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Model Files & Serialized Artifacts
+*.pkl
+*.joblib
+
+# Environments
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Distribution & Build
+dist/
+build/
+*.egg-info/

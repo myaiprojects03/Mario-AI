@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vsp-system"
+version = "0.1.0"
+description = "Sports prediction monorepo system"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "pandas>=2.0.0",
+    "polars>=0.20.0",
+    "sqlalchemy>=2.0.0",
+    "psycopg2-binary>=2.9.0",
+    "xgboost>=2.0.0",
+    "lightgbm>=4.0.0",
+    "statsmodels>=0.14.0",
+    "scipy>=1.11.0",
+    "scikit-learn>=1.3.0",
+    "pytest>=8.0.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "alembic>=1.13.0",
+    "tenacity>=8.2.0",
+    "responses>=0.25.0",
+]
+
+[tool.poetry]
+name = "vsp-system"
+version = "0.1.0"
+description = "Sports prediction monorepo system"
+authors = ["VSP Team"]
+readme = "README.md"
+packages = [
+    { include = "core" },
+    { include = "markets" }
+]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+pandas = "*"
+polars = "*"
+sqlalchemy = "*"
+psycopg2-binary = "*"
+xgboost = "*"
+lightgbm = "*"
+statsmodels = "*"
+scipy = "*"
+scikit-learn = "*"
+pytest = "*"
+python-dotenv = "*"
+requests = "*"
+pydantic = "*"
+pydantic-settings = "*"
+alembic = "*"
+tenacity = "*"
+responses = "*"
+
+[tool.uv]
+dev-dependencies = []
