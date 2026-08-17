@@ -49,6 +49,11 @@ EBASKET_OU_FEATURE_COLUMNS = [
     "hour_of_day_utc",
     "odds_drift_abs",
     "odds_drift_pct",
+    "home_bayesian_rating_mean",
+    "home_bayesian_rating_std",
+    "away_bayesian_rating_mean",
+    "away_bayesian_rating_std",
+    "bayesian_rating_diff",
 ]
 
 

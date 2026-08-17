@@ -15,7 +15,7 @@ from tenacity import (
 )
 
 from core.config.settings import settings
-from core.db.models import Match, Odds
+from core.db.models import Match, Odds, Result
 
 logger = logging.getLogger("core.ingestion.jarbet_client")
 logging.basicConfig(level=logging.INFO)
@@ -36,7 +36,7 @@ class JarBetClient:
         self.session = requests.Session()
         if self.api_key:
             self.session.headers.update({
-                "Authorization": f"Bearer {self.api_key}",
+                "x-api-key": self.api_key,
                 "Accept": "application/json",
             })
         
@@ -161,9 +161,12 @@ class JarBetClient:
     def _generate_match_id(self, item: Dict[str, Any], sport: str) -> str:
         """
         Extract match_id or generate a stable natural key hash if not explicitly provided.
-        ASSUMPTION: Generating md5 natural key hash if JarBet does not provide explicit match_id.
-        To confirm with client.
+        Supports _id, idMatchBet365, match_id, id, game_id.
         """
+        if "_id" in item and item["_id"]:
+            return str(item["_id"])
+        if "idMatchBet365" in item and item["idMatchBet365"]:
+            return str(item["idMatchBet365"])
         if "match_id" in item and item["match_id"]:
             return str(item["match_id"])
         if "id" in item and item["id"]:
@@ -171,27 +174,27 @@ class JarBetClient:
         if "game_id" in item and item["game_id"]:
             return str(item["game_id"])
 
-        # Natural key fallback: md5 hash of sport, league, home, away, start_time
+        # Natural key fallback
         league = item.get("league", "unknown")
         home = item.get("home_team", item.get("home", ""))
         away = item.get("away_team", item.get("away", ""))
-        start_time = item.get("match_start_time", item.get("start_time", ""))
+        start_time = item.get("startedAt", item.get("match_start_time", item.get("start_time", "")))
         raw_str = f"{sport}:{league}:{home}:{away}:{start_time}"
         return hashlib.md5(raw_str.encode("utf-8")).hexdigest()
 
     def upsert_match_data(
-        self, records: List[Dict[str, Any]], sport: str, db_session: Session
+        self, records: List[Dict[str, Any]], sport: str, db_session: Session, default_source: str = "jarbet_live"
     ) -> List[Match]:
         """
-        Parse raw API response items and upsert into core.matches and core.odds schema.
-        Handles malformed records gracefully by logging and skipping.
+        Parse raw API response items and upsert into core.matches, core.odds, and core.results.
+        Handles both nested live/history API JSON payloads and flat backfill payloads.
         """
         upserted_matches = []
         if not isinstance(records, list):
             logger.error(f"Expected list of records, got {type(records)}")
             return upserted_matches
 
-        for item in records:
+        for idx, item in enumerate(records, start=1):
             if not isinstance(item, dict):
                 logger.warning(f"Skipping malformed non-dict record: {item}")
                 continue
@@ -199,21 +202,37 @@ class JarBetClient:
             try:
                 match_id = self._generate_match_id(item, sport)
                 league = item.get("league", "Unknown League")
-                home_team = item.get("home_team", item.get("home", "Home Team"))
-                away_team = item.get("away_team", item.get("away", "Away Team"))
-                home_player = item.get("home_player")
-                away_player = item.get("away_player")
-                duration = item.get("duration_minutes")
-                source = item.get("source", "jarbet_live")
 
-                start_time_str = item.get("match_start_time", item.get("start_time"))
-                if start_time_str:
-                    if isinstance(start_time_str, str):
-                        try:
-                            start_time = datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
-                        except ValueError:
-                            start_time = datetime.now(timezone.utc)
-                    else:
+                # Handle nested home / away objects or flat strings
+                home_raw = item.get("home")
+                away_raw = item.get("away")
+
+                if isinstance(home_raw, dict):
+                    home_player = home_raw.get("name", item.get("home_player"))
+                    home_team = home_raw.get("teamName", item.get("home_team", "Home Team"))
+                    home_goals = home_raw.get("goals")
+                else:
+                    home_player = item.get("home_player")
+                    home_team = item.get("home_team", home_raw if isinstance(home_raw, str) else "Home Team")
+                    home_goals = item.get("final_home_score", item.get("home_score"))
+
+                if isinstance(away_raw, dict):
+                    away_player = away_raw.get("name", item.get("away_player"))
+                    away_team = away_raw.get("teamName", item.get("away_team", "Away Team"))
+                    away_goals = away_raw.get("goals")
+                else:
+                    away_player = item.get("away_player")
+                    away_team = item.get("away_team", away_raw if isinstance(away_raw, str) else "Away Team")
+                    away_goals = item.get("final_away_score", item.get("away_score"))
+
+                duration = item.get("duration_minutes")
+                source = item.get("source", default_source)
+
+                start_time_str = item.get("startedAt") or item.get("match_start_time") or item.get("start_time")
+                if start_time_str and isinstance(start_time_str, str):
+                    try:
+                        start_time = datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
+                    except ValueError:
                         start_time = datetime.now(timezone.utc)
                 else:
                     start_time = datetime.now(timezone.utc)
@@ -229,7 +248,8 @@ class JarBetClient:
                     existing_match.away_team = away_team
                     existing_match.match_start_time = start_time
                     existing_match.duration_minutes = duration
-                    existing_match.source = source
+                    if existing_match.source != "csv_backfill":
+                        existing_match.source = source
                     existing_match.raw_payload = item
                     match_obj = existing_match
                 else:
@@ -248,9 +268,52 @@ class JarBetClient:
                     )
                     db_session.add(match_obj)
 
-                # Parse attached odds if present in payload
-                odds_data = item.get("odds", [])
-                if isinstance(odds_data, list):
+                # Upsert Result if scores are present and non-null
+                if home_goals is not None and away_goals is not None:
+                    try:
+                        h_score = int(home_goals)
+                        a_score = int(away_goals)
+                        existing_res = db_session.query(Result).filter_by(match_id=match_id).first()
+                        if existing_res:
+                            existing_res.final_home_score = h_score
+                            existing_res.final_away_score = a_score
+                            existing_res.settled_at = start_time
+                            existing_res.settlement_source = source
+                        else:
+                            res_obj = Result(
+                                match_id=match_id,
+                                final_home_score=h_score,
+                                final_away_score=a_score,
+                                settled_at=start_time,
+                                settlement_source=source,
+                            )
+                            db_session.add(res_obj)
+                    except (ValueError, TypeError):
+                        pass
+
+                # Parse attached odds if present in payload (supports dict or list)
+                odds_data = item.get("odds", {})
+                if isinstance(odds_data, dict):
+                    # Nested odds object: {"over_under": {...}, "money_line": {...}, ...}
+                    for mkt_key, mkt_val in odds_data.items():
+                        if not isinstance(mkt_val, dict):
+                            continue
+                        m_name = f"{sport}_{mkt_key}" if not mkt_key.startswith(sport) else mkt_key
+                        line_val = mkt_val.get("line")
+                        odds_close_val = mkt_val.get("over") or mkt_val.get("home")
+                        odds_obj = Odds(
+                            match_id=match_id,
+                            market_type=m_name,
+                            line_value=float(line_val) if line_val is not None else None,
+                            odds_open=float(mkt_val.get("odds_open")) if mkt_val.get("odds_open") is not None else None,
+                            odds_close=float(odds_close_val) if odds_close_val is not None else None,
+                            odds_snapshot_time=datetime.now(timezone.utc),
+                            side="over" if "over" in mkt_val else "home",
+                        )
+                        db_session.add(odds_obj)
+
+                elif isinstance(odds_data, list):
+                    # List of dicts schema
                     for o_item in odds_data:
                         if not isinstance(o_item, dict):
                             continue
@@ -264,15 +327,17 @@ class JarBetClient:
                             side=o_item.get("side", "home"),
                         )
                         db_session.add(odds_obj)
-
-                db_session.commit()
                 upserted_matches.append(match_obj)
+
+                if idx % 500 == 0:
+                    db_session.commit()
 
             except Exception as err:
                 db_session.rollback()
                 logger.error(f"Malformed payload encountered. Skipping record {item}: {err}")
                 continue
 
+        db_session.commit()
         return upserted_matches
 
 
@@ -286,102 +351,70 @@ def detect_odds_snapshot_behavior(
     findings_file: str = "core/ingestion/FINDINGS.md",
 ) -> Dict[str, Any]:
     """
-    Polls/compares odds for the same match across polls to empirically detect
+    Compares odds for the same match across two polls to empirically detect
     whether JarBet pre-match odds update dynamically or remain static snapshots.
     """
-    match_id = first_poll_record.get("match_id", first_poll_record.get("id", "unknown"))
+    match_id = first_poll_record.get("match_id", first_poll_record.get("_id", first_poll_record.get("id", "unknown")))
     
     odds1 = first_poll_record.get("odds", {})
     odds2 = second_poll_record.get("odds", {})
 
-    open1 = odds1.get("odds_open") if isinstance(odds1, dict) else None
-    close1 = odds1.get("odds_close") if isinstance(odds1, dict) else None
-    open2 = odds2.get("odds_open") if isinstance(odds2, dict) else None
-    close2 = odds2.get("odds_close") if isinstance(odds2, dict) else None
-
-    is_dynamic = (open1 != open2) or (close1 != close2)
+    is_dynamic = (odds1 != odds2)
     behavior_type = "Dynamic Updates Across Polls" if is_dynamic else "Single Static Snapshot"
 
-    report = (
-        f"\n## Odds Snapshot Behavior Empirical Test\n"
-        f"- **Match ID**: `{match_id}`\n"
-        f"- **Poll 1 Odds**: open={open1}, close={close1}\n"
-        f"- **Poll 2 Odds**: open={open2}, close={close2}\n"
-        f"- **Empirical Behavior Detected**: **{behavior_type}**\n"
-    )
-
-    try:
-        with open(findings_file, "a", encoding="utf-8") as f:
-            f.write(report)
-    except IOError as e:
-        logger.error(f"Failed writing to {findings_file}: {e}")
+    diff_details = {}
+    if is_dynamic and isinstance(odds1, dict) and isinstance(odds2, dict):
+        for k in set(list(odds1.keys()) + list(odds2.keys())):
+            if odds1.get(k) != odds2.get(k):
+                diff_details[k] = {"poll_1": odds1.get(k), "poll_2": odds2.get(k)}
 
     return {
         "match_id": match_id,
         "is_dynamic": is_dynamic,
         "behavior_type": behavior_type,
+        "diff_details": diff_details,
     }
 
 
 def analyze_half_time_odds_presence(
-    fifa_records: List[Dict[str, Any]],
+    matches: List[Dict[str, Any]],
     findings_file: str = "core/ingestion/FINDINGS.md",
 ) -> Dict[str, Any]:
     """
-    Analyzes FIFA records for half-time odds fields (over_under_ht, asian_handicap_ht)
-    by league to determine if missing HT odds are a 'market not offered' pattern (0% presence)
-    or a 'random collection gap' pattern (>0% and <100% presence).
+    Analyzes presence of Half-Time odds (e.g. asian_handicap_ht or over_under_ht)
+    across all matches, broken down by league.
     """
-    league_stats: Dict[str, Dict[str, int]] = {}
+    league_stats = {}
 
-    for rec in fifa_records:
-        league = rec.get("league", "Unknown League")
-        if league not in league_stats:
-            league_stats[league] = {"total": 0, "ht_present": 0}
-        
-        league_stats[league]["total"] += 1
-        
-        has_ou_ht = "over_under_ht" in rec or rec.get("odds", {}).get("over_under_ht") is not None
-        has_ah_ht = "asian_handicap_ht" in rec or rec.get("odds", {}).get("asian_handicap_ht") is not None
-        
-        if has_ou_ht or has_ah_ht:
-            league_stats[league]["ht_present"] += 1
+    for item in matches:
+        if not isinstance(item, dict):
+            continue
+        league = item.get("league", "Unknown League")
+        odds = item.get("odds", {})
 
-    summary_lines = [
-        "\n## FIFA Half-Time (HT) Odds Field Presence Analysis",
-        "| League | Total Matches | HT Odds Present | Presence Rate | Empirical Pattern |",
-        "|---|---|---|---|---|",
-    ]
-
-    results = {}
-    for league, stats in league_stats.items():
-        total = stats["total"]
-        present = stats["ht_present"]
-        rate = (present / total) * 100.0 if total > 0 else 0.0
-
-        if rate == 0.0:
-            pattern = "Market Not Offered (Concentrated)"
-        elif rate == 100.0:
-            pattern = "Consistently Offered"
-        else:
-            pattern = "Random Collection Gap"
-
-        summary_lines.append(
-            f"| {league} | {total} | {present} | {rate:.1f}% | {pattern} |"
+        has_ht = (
+            "asian_handicap_ht" in item or "over_under_ht" in item or
+            (isinstance(odds, dict) and ("asian_handicap_ht" in odds or "over_under_ht" in odds or "ht" in str(odds).lower())) or
+            (isinstance(odds, list) and any("ht" in str(o.get("market_type", "")).lower() for o in odds if isinstance(o, dict)))
         )
-        results[league] = {
+
+        if league not in league_stats:
+            league_stats[league] = {"total": 0, "present": 0}
+
+        league_stats[league]["total"] += 1
+        if has_ht:
+            league_stats[league]["present"] += 1
+
+    summary = {}
+    for lg, counts in league_stats.items():
+        total = counts["total"]
+        present = counts["present"]
+        rate = (present / total) * 100.0 if total > 0 else 0.0
+        summary[lg] = {
             "total": total,
             "present": present,
-            "rate": rate,
-            "pattern": pattern,
+            "rate": round(rate, 2),
+            "pattern": "Consistently Offered" if rate > 80.0 else ("Partially Offered" if rate > 0 else "Not Offered"),
         }
 
-    report = "\n".join(summary_lines) + "\n"
-
-    try:
-        with open(findings_file, "a", encoding="utf-8") as f:
-            f.write(report)
-    except IOError as e:
-        logger.error(f"Failed writing to {findings_file}: {e}")
-
-    return results
+    return summary

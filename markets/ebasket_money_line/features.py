@@ -48,6 +48,11 @@ EBASKET_ML_FEATURE_COLUMNS = [
     "implied_vs_hist_divergence",
     "odds_drift_abs",
     "odds_drift_pct",
+    "home_bayesian_rating_mean",
+    "home_bayesian_rating_std",
+    "away_bayesian_rating_mean",
+    "away_bayesian_rating_std",
+    "bayesian_rating_diff",
 ]
 
 

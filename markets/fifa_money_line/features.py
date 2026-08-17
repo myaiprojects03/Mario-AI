@@ -65,6 +65,11 @@ ML_FEATURE_COLUMNS = [
     "implied_vs_hist_divergence",
     "odds_drift_abs",
     "odds_drift_pct",
+    "home_bayesian_rating_mean",
+    "home_bayesian_rating_std",
+    "away_bayesian_rating_mean",
+    "away_bayesian_rating_std",
+    "bayesian_rating_diff",
 ]
 
 
@@ -213,6 +218,25 @@ def build_fifa_money_line_features(df: pl.DataFrame) -> pl.DataFrame:
             pl.lit(0.0).alias("odds_drift_abs"),
             pl.lit(0.0).alias("odds_drift_pct"),
         ])
+
+    # 10. Bayesian Rating Trajectory Engine (Conjugate Normal-Normal updates)
+    from core.features.bayesian_ratings import compute_bayesian_ratings_trajectory
+    home_bayesian = compute_bayesian_ratings_trajectory(
+        work_df, entity_col="home_player", score_col=home_score_col, time_col="startedAt",
+        default_mu=1.5, default_sigma=1.0, obs_sigma=1.2, prefix="home_bayesian_rating"
+    )
+    away_bayesian = compute_bayesian_ratings_trajectory(
+        work_df, entity_col="away_player", score_col=away_score_col, time_col="startedAt",
+        default_mu=1.5, default_sigma=1.0, obs_sigma=1.2, prefix="away_bayesian_rating"
+    )
+
+    work_df = work_df.with_columns([
+        home_bayesian["home_bayesian_rating_mean"].alias("home_bayesian_rating_mean"),
+        home_bayesian["home_bayesian_rating_std"].alias("home_bayesian_rating_std"),
+        away_bayesian["away_bayesian_rating_mean"].alias("away_bayesian_rating_mean"),
+        away_bayesian["away_bayesian_rating_std"].alias("away_bayesian_rating_std"),
+        (home_bayesian["home_bayesian_rating_mean"] - away_bayesian["away_bayesian_rating_mean"]).alias("bayesian_rating_diff"),
+    ])
 
     # Fill any remaining missing feature columns with defaults
     for col in ML_FEATURE_COLUMNS:

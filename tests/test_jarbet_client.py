@@ -60,6 +60,7 @@ class TestJarBetClient(unittest.TestCase):
 
         matches_raw = self.client.get_fifa_pre()
         self.assertEqual(len(matches_raw), 1)
+        self.assertEqual(responses.calls[0].request.headers.get("x-api-key"), "test_api_key")
 
         upserted = self.client.upsert_match_data(matches_raw, sport="fifa", db_session=self.db_session)
         self.assertEqual(len(upserted), 1)

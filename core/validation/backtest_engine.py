@@ -83,7 +83,11 @@ class BacktestEngine:
 
         # Filter tips meeting minimum odds floor AND confidence threshold
         filtered_df = work_df.filter(
+            pl.col(odds_col).is_not_null() &
+            (~pl.col(odds_col).is_nan()) &
             (pl.col(odds_col) >= min_odds_floor) &
+            pl.col(confidence_col).is_not_null() &
+            (~pl.col(confidence_col).is_nan()) &
             (pl.col(confidence_col) >= self.min_confidence)
         )
 

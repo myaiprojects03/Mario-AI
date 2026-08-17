@@ -91,4 +91,11 @@ def build_fifa_goals_ou_features(df: pl.DataFrame) -> pl.DataFrame:
             else:
                 work_df = work_df.with_columns(pl.lit(0.0).alias(col))
 
-    return work_df.select(FEATURE_COLUMNS)
+    # Select feature columns plus metadata/result/odds columns if present
+    meta_cols = [c for c in [
+        "match_start_time", "startedAt", "home.goals", "away.goals",
+        "final_home_score", "final_away_score", "odds_close",
+        "closingOdds.over_under.over", "odds.over_under.line", "source", "league"
+    ] if c in work_df.columns and c not in FEATURE_COLUMNS]
+
+    return work_df.select(FEATURE_COLUMNS + meta_cols)
