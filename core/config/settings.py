@@ -15,5 +15,12 @@ class Settings(BaseSettings):
     JARBET_BASE_URL: str = ""
     BETSAPI_TOKEN: str = ""
 
+    # Provisional Daily Tip Limits per Channel
+    DAILY_LIMIT_FIFA_GOALS_OU: int = 150
+    DAILY_LIMIT_FIFA_MONEY_LINE: int = 150
+    DAILY_LIMIT_FIFA_ASIAN_HANDICAP: int = 100
+    DAILY_LIMIT_EBASKET_MONEY_LINE: int = 150
+    DAILY_LIMIT_EBASKET_OU: int = 150
+
 
 settings = Settings()
