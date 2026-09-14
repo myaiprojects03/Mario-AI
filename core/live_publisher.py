@@ -47,6 +47,14 @@ DAILY_TIP_LIMITS = {
     "ebasket_ou": int(os.getenv("DAILY_LIMIT_EBASKET_OU", "150")),
 }
 
+BOT_TOKENS = {
+    "fifa_goals_ou": os.getenv("TELEGRAM_BOT_TOKEN_FIFA_GOALS") or os.getenv("TELEGRAM_BOT_TOKEN") or TELEGRAM_BOT_TOKEN,
+    "fifa_asian_handicap": os.getenv("TELEGRAM_BOT_TOKEN_FIFA_AH") or os.getenv("TELEGRAM_BOT_TOKEN") or TELEGRAM_BOT_TOKEN,
+    "fifa_money_line": os.getenv("TELEGRAM_BOT_TOKEN_FIFA_ML") or os.getenv("TELEGRAM_BOT_TOKEN") or TELEGRAM_BOT_TOKEN,
+    "ebasket_money_line": os.getenv("TELEGRAM_BOT_TOKEN_EBASKET_ML") or os.getenv("TELEGRAM_BOT_TOKEN") or TELEGRAM_BOT_TOKEN,
+    "ebasket_ou": os.getenv("TELEGRAM_BOT_TOKEN_EBASKET_OU") or os.getenv("TELEGRAM_BOT_TOKEN") or TELEGRAM_BOT_TOKEN,
+}
+
 CHANNEL_MAP = {
     "fifa_goals_ou": os.getenv("TELEGRAM_CHANNEL_FIFA_GOALS", ""),
     "fifa_asian_handicap": os.getenv("TELEGRAM_CHANNEL_FIFA_AH", ""),
