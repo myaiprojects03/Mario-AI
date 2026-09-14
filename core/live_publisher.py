@@ -976,7 +976,7 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
         except Exception as e:
             logger.debug(f"History pull error: {e}")
 
-    # Also load audit data and DB results as additional score sources
+    # Also load audit data and PostgreSQL DB results as score sources
     audit_data = load_all_tip_history()
     db_results = {}
     if audit_data:
@@ -989,6 +989,36 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                     db_results[m_str] = (float(h), float(a))
                 except (ValueError, TypeError):
                     pass
+
+    # Query PostgreSQL database core.results and core.matches directly
+    try:
+        import psycopg2
+        from core.config.settings import settings
+        db_url = settings.DATABASE_URL or os.getenv("DATABASE_URL") or "postgresql://postgres:postgrespassword@db:5432/mario_ai"
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+        
+        # Query core.results
+        cur.execute("SELECT match_id, final_home_score, final_away_score FROM core.results")
+        for m_str, h, a in cur.fetchall():
+            if m_str and h is not None and a is not None:
+                db_results[str(m_str)] = (float(h), float(a))
+                
+        # Query core.matches raw_payload for bet365 IDs & scores
+        cur.execute("SELECT match_id, raw_payload FROM core.matches WHERE raw_payload IS NOT NULL ORDER BY match_start_time DESC LIMIT 1000")
+        for m_str, raw in cur.fetchall():
+            if isinstance(raw, dict):
+                b365_id = str(raw.get("idMatchBet365") or m_str)
+                h_obj = raw.get("home", {}) if isinstance(raw.get("home"), dict) else {}
+                a_obj = raw.get("away", {}) if isinstance(raw.get("away"), dict) else {}
+                h_g = h_obj.get("goals") if h_obj.get("goals") is not None else h_obj.get("score")
+                a_g = a_obj.get("goals") if a_obj.get("goals") is not None else a_obj.get("score")
+                if h_g is not None and a_g is not None:
+                    db_results[b365_id] = (float(h_g), float(a_g))
+                    db_results[str(m_str)] = (float(h_g), float(a_g))
+        conn.close()
+    except Exception as db_ex:
+        logger.debug(f"PostgreSQL match score query note: {db_ex}")
 
     keys_to_settle = list(cache.keys())
     for key in keys_to_settle:
