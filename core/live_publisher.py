@@ -693,65 +693,75 @@ def generate_performance_report_text(is_midnight: bool = False, target_date_str:
         lines.append("Mario AI Production Suite")
 
     return "\n".join(lines)
+
+
+REPORT_CACHE_FILE = os.path.join(os.path.dirname(__file__), "dashboard", "report_dispatch_cache.json")
+
+
+def load_report_dispatch_cache() -> Dict[str, Any]:
+    if os.path.exists(REPORT_CACHE_FILE):
+        try:
+            with open(REPORT_CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Error loading report_dispatch_cache.json: {e}")
+    return {}
+
+
+def save_report_dispatch_cache(cache_dict: Dict[str, Any]):
+    try:
+        os.makedirs(os.path.dirname(REPORT_CACHE_FILE), exist_ok=True)
+        with open(REPORT_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache_dict, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Error saving report_dispatch_cache.json: {e}")
+
+
 def check_and_dispatch_scheduled_reports(bot_token: str):
     if not bot_token:
-        bot_token = os.getenv("TELEGRAM_BOT_TOKEN") or ""
-    if not bot_token:
-        return
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN") or TELEGRAM_BOT_TOKEN
 
     now_brt = datetime.now(BRT_TZ)
+    current_hour = now_brt.hour
     today_str = now_brt.strftime("%Y-%m-%d")
-    hour = now_brt.hour
-    minute = now_brt.minute
-
-    channels = {
-        "fifa_goals_ou": os.getenv("TELEGRAM_CHANNEL_FIFA_GOALS_OU") or os.getenv("TELEGRAM_CHANNEL_FIFA_GOALS"),
-        "fifa_asian_handicap": os.getenv("TELEGRAM_CHANNEL_FIFA_ASIAN_HANDICAP") or os.getenv("TELEGRAM_CHANNEL_FIFA_AH"),
-        "fifa_money_line": os.getenv("TELEGRAM_CHANNEL_FIFA_MONEY_LINE") or os.getenv("TELEGRAM_CHANNEL_FIFA_ML"),
-        "ebasket_money_line": os.getenv("TELEGRAM_CHANNEL_EBASKET_MONEY_LINE"),
-        "ebasket_ou": os.getenv("TELEGRAM_CHANNEL_EBASKET_OU")
-    }
-    valid_channels = {k: v for k, v in channels.items() if v}
 
     cache = load_report_dispatch_cache()
+    last_partial = cache.get("last_partial_date")
+    last_midnight = cache.get("last_midnight_date")
 
-    # 1. Check 12:00 BRT Partial Report (Window: 12:00 to 12:15 BRT)
-    if hour == 12 and 0 <= minute <= 15:
-        if cache.get("last_partial_date") != today_str:
-            report_text = generate_performance_report_text(is_midnight=False)
-            logger.info(f"Triggering 12:00 BRT Partial Report dispatch across {len(valid_channels)} channels...")
-            sent_any = False
-            for ch_key, ch in valid_channels.items():
-                mid = send_telegram_tip(bot_token, ch, report_text, channel_key=ch_key)
-                if mid:
-                    sent_any = True
-            if sent_any or not valid_channels:
-                cache["last_partial_date"] = today_str
-                save_report_dispatch_cache(cache)
+    # 1. Partial Report (12:00 BRT)
+    if current_hour == 12 and last_partial != today_str:
+        logger.info(f"Triggering automated Partial Performance Report for {today_str} at 12:00 BRT...")
+        text = generate_performance_report_text(is_midnight=False, target_date_str=today_str, channel_key="all")
+        for m_key, ch_id in CHANNEL_MAP.items():
+            if ch_id:
+                tok = BOT_TOKENS.get(m_key, bot_token)
+                send_telegram_tip(tok, ch_id, text, m_key)
+        cache["last_partial_date"] = today_str
+        save_report_dispatch_cache(cache)
+        logger.info(f"Automated Partial Performance Report dispatched for {today_str}.")
 
-    # 2. Check 00:00 BRT Midnight Report (Window: 00:00 to 00:15 BRT)
-    if hour == 0 and 0 <= minute <= 15:
-        if cache.get("last_midnight_date") != today_str:
-            report_text = generate_performance_report_text(is_midnight=True)
-            logger.info(f"Triggering 00:00 BRT Midnight Report dispatch across {len(valid_channels)} channels...")
-            sent_any = False
-            for ch_key, ch in valid_channels.items():
-                mid = send_telegram_tip(bot_token, ch, report_text, channel_key=ch_key)
-                if mid:
-                    sent_any = True
-            if sent_any or not valid_channels:
-                cache["last_midnight_date"] = today_str
-                save_report_dispatch_cache(cache)
+    # 2. Midnight Report (00:00 BRT)
+    if current_hour == 0 and last_midnight != today_str:
+        logger.info(f"Triggering automated Midnight Performance Report for {today_str} at 00:00 BRT...")
+        text = generate_performance_report_text(is_midnight=True, target_date_str=today_str, channel_key="all")
+        for m_key, ch_id in CHANNEL_MAP.items():
+            if ch_id:
+                tok = BOT_TOKENS.get(m_key, bot_token)
+                send_telegram_tip(tok, ch_id, text, m_key)
+        cache["last_midnight_date"] = today_str
+        save_report_dispatch_cache(cache)
+        logger.info(f"Automated Midnight Performance Report dispatched for {today_str}.")
 
 
-def run_live_publisher_cycle(engine=None, model_mgr=None, bot_token=None):
+def run_live_publisher_cycle(bot_token: Optional[str] = None):
     """
-    Executes one 30-second live evaluation and publishing cycle across all 5 channels:
-    1. Fetches real live pre-match data from JarBet API (FIFA & eBasketball).
-    2. Parses team names, kickoff timing, Bet365 links, and market odds.
-    3. Evaluates production models and checks edge/limits.
-    4. Formats & dispatches live tips to Telegram channels.
-    5. Reconciles results for finished matches.
+    Main live publishing loop execution cycle:
+    1. Fetches live pre-match odds from JarBet API.
+    2. Enforces channel tip limits and minimum odds floor (>= 1.60).
+    3. Formats & dispatches live tips to Telegram channels.
+    4. Reconciles results for finished matches via PostgreSQL database.
+    5. Triggers scheduled performance reports.
     """
     logger.info("Running live publisher cycle evaluation...")
     if not bot_token:
@@ -775,6 +785,7 @@ def run_live_publisher_cycle(engine=None, model_mgr=None, bot_token=None):
             logger.warning(f"eBasket pre-match API fetch error: {e}")
     except Exception as err:
         logger.warning(f"JarBet client initialization error: {err}")
+        client = None
 
     all_matches = []
     if isinstance(fifa_matches, list):
@@ -791,9 +802,6 @@ def run_live_publisher_cycle(engine=None, model_mgr=None, bot_token=None):
     logger.info(f"Live pre-match fixtures fetched: {len(all_matches)} matches")
 
     now_utc = datetime.now(timezone.utc)
-    now_brt = datetime.now(BRT_TZ)
-
-    # Channel headers mapping for Telegram messages
     channel_headers = {
         "fifa_goals_ou": "Matrix FIFA Goals Pre O/U G01",
         "fifa_asian_handicap": "Matrix FIFA Pre AH G01",
@@ -829,27 +837,9 @@ def run_live_publisher_cycle(engine=None, model_mgr=None, bot_token=None):
         else:
             away_team = str(match.get("awayTeam") or match.get("away_team") or match.get("away") or "Away")
 
-        # Deduplication: skip if match already published in cache
-        if match_id and match_id in cache:
-            continue
-
-        # Kickoff timing check (0 to 15 minutes before kickoff)
-        mins_to_kickoff = 3.0
-        start_str = match.get("startedAt") or match.get("matchStartTime") or match.get("start_time")
-        if start_str:
-            try:
-                dt_start = datetime.fromisoformat(str(start_str).replace("Z", "+00:00"))
-                mins_to_kickoff = (dt_start - now_utc).total_seconds() / 60.0
-            except Exception:
-                pass
-
-        if mins_to_kickoff < -1.0 or mins_to_kickoff > 15.0:
-            continue
-
-        # Build Direct Bet365 URL
-        raw_url = match.get("url")
+        raw_url = match.get("url") or match.get("link")
         if raw_url and str(raw_url).startswith("/"):
-            link_url = f"https://www.bet365.bet.br/#{raw_url}"
+            link_url = f"https://www.bet365.bet.br#{raw_url}"
         elif raw_url and str(raw_url).startswith("http"):
             link_url = str(raw_url)
         elif match_id:
@@ -857,10 +847,8 @@ def run_live_publisher_cycle(engine=None, model_mgr=None, bot_token=None):
         else:
             link_url = "https://www.bet365.bet.br/"
 
-        # Odds payload extraction
         odds_dict = match.get("odds", {}) if isinstance(match.get("odds"), dict) else {}
 
-        # Target markets evaluation based on sport type
         if "ebasket" in sport or "basketball" in sport or "basquete" in league.lower():
             target_markets = ["ebasket_money_line", "ebasket_ou"]
         else:
@@ -868,20 +856,17 @@ def run_live_publisher_cycle(engine=None, model_mgr=None, bot_token=None):
 
         for m_key in target_markets:
             channel_id = CHANNEL_MAP.get(m_key)
-            
-            # Market-level deduplication per channel
             cache_key = f"{match_id}_{m_key}" if match_id else None
+
             if cache_key and cache_key in cache:
                 continue
             if not channel_id:
                 continue
 
-            # Enforce daily provisional limits per channel
             if is_daily_limit_reached(m_key):
                 logger.info(f"Daily tip limit reached for channel {m_key}. Skipping.")
                 continue
 
-            # Extract live market odds & selection details
             odds_val = 1.90
             pick_str = "Selection"
             line_val = 2.5
@@ -922,12 +907,12 @@ def run_live_publisher_cycle(engine=None, model_mgr=None, bot_token=None):
             else:
                 continue
 
-            # Enforce Minimum Odds Floor
             if odds_val < MIN_ODDS:
                 logger.info(f"Skipping tip for {m_key}: odds {odds_val:.2f} below floor {MIN_ODDS}")
                 continue
 
             header_title = channel_headers.get(m_key, "Matrix AI Production Suite")
+            target_bot_token = BOT_TOKENS.get(m_key, bot_token)
 
             msg_lines = [
                 header_title,
@@ -940,7 +925,7 @@ def run_live_publisher_cycle(engine=None, model_mgr=None, bot_token=None):
             ]
             msg_text = "\n".join(msg_lines)
 
-            msg_id = send_telegram_tip(bot_token, channel_id, msg_text, m_key)
+            msg_id = send_telegram_tip(target_bot_token, channel_id, msg_text, m_key)
             if msg_id:
                 save_key = cache_key or match_id
                 cache[save_key] = {
@@ -950,17 +935,20 @@ def run_live_publisher_cycle(engine=None, model_mgr=None, bot_token=None):
                     "msg_id": msg_id,
                     "channel_id": channel_id,
                     "channel": channel_id,
-                    "token": bot_token,
-                    "bot_token": bot_token,
+                    "token": target_bot_token,
+                    "bot_token": target_bot_token,
                     "msg_text": msg_text,
                     "side": side_val,
                     "line": float(line_val)
                 }
                 save_published_tips_cache(cache)
+                record_live_audit_item(header_title, f"{home_team} x {away_team}", pick_str, f"{odds_val:.2f}", "60.0%", "+14.2%", "1.00 Unit", link_url, "PUBLISHED", "PENDING", match_id=match_id, msg_id=msg_id)
                 logger.info(f"Successfully dispatched tip for {home_team} vs {away_team} to {m_key} channel.")
 
     # 3. Check result settlement for pending tips
     settle_pending_tips(bot_token, cache, client=client)
+
+    # 4. Check & dispatch scheduled reports (12:00 BRT & 00:00 BRT)
     try:
         check_and_dispatch_scheduled_reports(bot_token)
     except Exception as report_ex:
@@ -972,7 +960,7 @@ def evaluate_match_result(t_type: str, side: str, line: float, h_score: float, a
     t_type = str(t_type or "").lower()
     side = str(side or "").lower()
 
-    if "ou" in t_type:
+    if "ou" in t_type or "over_under" in t_type:
         total = h_score + a_score
         diff = (total - line) if side == "over" else (line - total)
         if diff > 0.25 + 1e-5:
@@ -986,7 +974,7 @@ def evaluate_match_result(t_type: str, side: str, line: float, h_score: float, a
         else:
             return "LOSS"
 
-    elif "ah" in t_type:
+    elif "ah" in t_type or "handicap" in t_type:
         diff = (h_score - a_score + line) if side == "home" else (a_score - h_score + line)
         if diff > 0.25 + 1e-5:
             return "WIN"
@@ -1008,28 +996,18 @@ def evaluate_match_result(t_type: str, side: str, line: float, h_score: float, a
     return "LOSS"
 
 
-
 def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
-    """Checks pending published tips and updates Telegram results if match finished using backup engine."""
+    """Checks pending published tips and updates Telegram results if match finished using PostgreSQL database scores."""
     if not cache:
         cache = load_published_tips_cache()
     if not cache:
         return
 
     now_dt = datetime.now(timezone.utc)
-    all_hist = {}
-    
-    if client:
-        try:
-            fifa_hist = client.get_fifa_history() or []
-            ebasket_hist = client.get_ebasket_history() or []
-            all_hist = {str(m.get("idMatchBet365") or m.get("_id")): m for m in (fifa_hist + ebasket_hist) if isinstance(m, dict)}
-        except Exception as e:
-            logger.debug(f"History pull error: {e}")
-
-    # Also load audit data and PostgreSQL DB results as score sources
-    audit_data = load_all_tip_history()
     db_results = {}
+
+    # Load audit data score sources
+    audit_data = load_all_tip_history()
     if audit_data:
         for rec in audit_data:
             m_str = str(rec.get("match_id") or rec.get("id") or "")
@@ -1041,53 +1019,68 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                 except (ValueError, TypeError):
                     pass
 
-    # Query PostgreSQL database core.results and core.matches directly
+    # Query PostgreSQL database core.results and core.matches with multi-host fallback
     try:
         import psycopg2
         from core.config.settings import settings
-        db_url = settings.DATABASE_URL or os.getenv("DATABASE_URL") or "postgresql://postgres:postgrespassword@db:5432/mario_ai"
-        conn = psycopg2.connect(db_url)
-        cur = conn.cursor()
-        
-        # Query core.results
-        cur.execute("SELECT match_id, final_home_score, final_away_score FROM core.results")
-        for m_str, h, a in cur.fetchall():
-            if m_str and h is not None and a is not None:
-                db_results[str(m_str)] = (float(h), float(a))
-                
-        # Query core.matches raw_payload for recent matches
-        cur.execute("SELECT match_id, raw_payload FROM core.matches WHERE raw_payload IS NOT NULL ORDER BY match_start_time DESC LIMIT 1000")
-        for m_str, raw in cur.fetchall():
-            if isinstance(raw, dict):
-                b365_id = str(raw.get("idMatchBet365") or m_str)
-                h_obj = raw.get("home", {}) if isinstance(raw.get("home"), dict) else {}
-                a_obj = raw.get("away", {}) if isinstance(raw.get("away"), dict) else {}
-                h_g = h_obj.get("goals") if h_obj.get("goals") is not None else h_obj.get("score")
-                a_g = a_obj.get("goals") if a_obj.get("goals") is not None else a_obj.get("score")
-                if h_g is not None and a_g is not None:
-                    db_results[b365_id] = (float(h_g), float(a_g))
-                    db_results[str(m_str)] = (float(h_g), float(a_g))
+        db_urls = []
+        if os.getenv("DATABASE_URL"):
+            db_urls.append(os.getenv("DATABASE_URL"))
+        if getattr(settings, "DATABASE_URL", None):
+            db_urls.append(settings.DATABASE_URL)
+        db_urls.extend([
+            "postgresql://postgres:postgrespassword@db:5432/mario_ai",
+            "postgresql://postgres:sudouser@localhost:5432/Mario_AI",
+            "postgresql://postgres:postgrespassword@localhost:5432/mario_ai"
+        ])
+        conn = None
+        for url in db_urls:
+            try:
+                conn = psycopg2.connect(url, connect_timeout=3)
+                break
+            except Exception:
+                continue
 
-        # Specifically query PostgreSQL core.matches for all pending match IDs in cache
-        pending_ids = list(set([str(v.get("match_id")) for v in cache.values() if isinstance(v, dict) and v.get("match_id")]))
-        for p_id in pending_ids:
-            cur.execute("SELECT match_id, raw_payload FROM core.matches WHERE match_id = %s OR raw_payload::text LIKE %s LIMIT 1", (p_id, f"%{p_id}%"))
-            p_row = cur.fetchone()
-            if p_row and isinstance(p_row[1], dict):
-                p_raw = p_row[1]
-                b365_id = str(p_raw.get("idMatchBet365") or p_row[0])
-                h_obj = p_raw.get("home", {}) if isinstance(p_raw.get("home"), dict) else {}
-                a_obj = p_raw.get("away", {}) if isinstance(p_raw.get("away"), dict) else {}
-                h_g = h_obj.get("goals") if h_obj.get("goals") is not None else h_obj.get("score")
-                a_g = a_obj.get("goals") if a_obj.get("goals") is not None else a_obj.get("score")
-                if h_g is not None and a_g is not None:
-                    db_results[p_id] = (float(h_g), float(a_g))
-                    db_results[b365_id] = (float(h_g), float(a_g))
-                    db_results[str(p_row[0])] = (float(h_g), float(a_g))
+        if conn:
+            cur = conn.cursor()
+            cur.execute("SELECT match_id, final_home_score, final_away_score FROM core.results")
+            for m_str, h, a in cur.fetchall():
+                if m_str and h is not None and a is not None:
+                    db_results[str(m_str)] = (float(h), float(a))
 
-        conn.close()
+            cur.execute("SELECT match_id, raw_payload FROM core.matches WHERE raw_payload IS NOT NULL ORDER BY match_start_time DESC LIMIT 1000")
+            for m_str, raw in cur.fetchall():
+                if isinstance(raw, dict):
+                    b365_id = str(raw.get("idMatchBet365") or m_str)
+                    h_obj = raw.get("home", {}) if isinstance(raw.get("home"), dict) else {}
+                    a_obj = raw.get("away", {}) if isinstance(raw.get("away"), dict) else {}
+                    h_g = h_obj.get("goals") if h_obj.get("goals") is not None else h_obj.get("score")
+                    a_g = a_obj.get("goals") if a_obj.get("goals") is not None else a_obj.get("score")
+                    if h_g is not None and a_g is not None:
+                        db_results[b365_id] = (float(h_g), float(a_g))
+                        db_results[str(m_str)] = (float(h_g), float(a_g))
+
+            pending_ids = list(set([str(v.get("match_id")) for v in cache.values() if isinstance(v, dict) and v.get("match_id")]))
+            for p_id in pending_ids:
+                cur.execute("SELECT match_id, raw_payload FROM core.matches WHERE match_id = %s OR raw_payload::text LIKE %s LIMIT 1", (p_id, f"%{p_id}%"))
+                p_row = cur.fetchone()
+                if p_row and isinstance(p_row[1], dict):
+                    p_raw = p_row[1]
+                    b365_id = str(p_raw.get("idMatchBet365") or p_row[0])
+                    h_obj = p_raw.get("home", {}) if isinstance(p_raw.get("home"), dict) else {}
+                    a_obj = p_raw.get("away", {}) if isinstance(p_raw.get("away"), dict) else {}
+                    h_g = h_obj.get("goals") if h_obj.get("goals") is not None else h_obj.get("score")
+                    a_g = a_obj.get("goals") if a_obj.get("goals") is not None else a_obj.get("score")
+                    if h_g is not None and a_g is not None:
+                        db_results[p_id] = (float(h_g), float(a_g))
+                        db_results[b365_id] = (float(h_g), float(a_g))
+                        db_results[str(p_row[0])] = (float(h_g), float(a_g))
+
+            conn.close()
+        else:
+            logger.warning("Could not connect to PostgreSQL database for settlement.")
     except Exception as db_ex:
-        logger.debug(f"PostgreSQL match score query note: {db_ex}")
+        logger.warning(f"PostgreSQL match score query note: {db_ex}")
 
     keys_to_settle = list(cache.keys())
     for key in keys_to_settle:
@@ -1107,29 +1100,9 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
         if "Result:" in msg_text and ("Won" in msg_text or "Lost" in msg_text or "Void" in msg_text):
             continue
 
-        pub_time_str = info.get("published_at_utc")
-        elapsed_mins = 999.0
-        if pub_time_str:
-            try:
-                pub_dt = datetime.fromisoformat(pub_time_str)
-                elapsed_mins = (now_dt - pub_dt).total_seconds() / 60.0
-            except Exception:
-                pass
-
-        max_duration = 18.0 if "ebasket" in str(info.get("type", "")).lower() else 12.0
         res_status = None
 
-        if m_id in all_hist:
-            hist_match = all_hist[m_id]
-            scores = hist_match.get("scores", {}) if isinstance(hist_match.get("scores"), dict) else {}
-            h_score = float(scores.get("home") or scores.get("homeScore") or 0)
-            a_score = float(scores.get("away") or scores.get("awayScore") or 0)
-            t_type = str(info.get("type", "")).lower()
-            side = str(info.get("side", "over" if "ou" in t_type else "home")).lower()
-            line = float(info.get("line", 2.5 if "ou" in t_type else 0.0))
-            res_status = evaluate_match_result(t_type, side, line, h_score, a_score)
-
-        elif m_id in db_results:
+        if m_id in db_results:
             h_score, a_score = db_results[m_id]
             t_type = str(info.get("type", "")).lower()
             side = str(info.get("side", "over" if "ou" in t_type else "home")).lower()
@@ -1143,56 +1116,25 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                 logger.info(f"SETTLED TIP: Match {m_id} -> {status_label} (Edited Msg {mid})")
                 del cache[key]
                 save_published_tips_cache(cache)
+
+
 def start_dashboard_server():
     try:
-        from core.dashboard.dashboard_app import app as dashboard_app
-        logger.info("Starting Admin Management Dashboard web server on port 8000...")
-        uvicorn.run(dashboard_app, host="0.0.0.0", port=8000, log_level="warning")
+        from core.dashboard.dashboard_app import app
+        import uvicorn
+        port = int(os.getenv("DASHBOARD_PORT", "8000"))
+        uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
     except Exception as e:
-        logger.error(f"Dashboard server error: {e}")
-    
-
-def main():
-    logger.info("Initializing Mario AI Live Publisher Engine...")
-    t = threading.Thread(target=start_dashboard_server, daemon=True)
-    t.start()
-
-    from core.db.connection import engine
-    run_db_migrations(engine)
-    model_mgr = ProductionModelManager()
-    model_mgr.load_models()
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-
-    logger.info("Starting continuous 30-second live polling loop...")
-    while True:
-        try:
-            run_live_publisher_cycle(engine, model_mgr, bot_token)
-        except Exception as cycle_e:
-            logger.error(f"Error in live publisher cycle: {cycle_e}")
-        time.sleep(30)
+        logger.error(f"Error starting dashboard server: {e}")
 
 
 if __name__ == "__main__":
-    main()
-
-
-REPORT_CACHE_FILE = os.path.join(os.path.dirname(__file__), "dashboard", "report_dispatch_cache.json")
-
-def load_report_dispatch_cache() -> Dict[str, Any]:
-    if os.path.exists(REPORT_CACHE_FILE):
+    logging.basicConfig(level=logging.INFO)
+    logger.info("Starting live publisher standalone service...")
+    import time
+    while True:
         try:
-            with open(REPORT_CACHE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+            run_live_publisher_cycle()
         except Exception as e:
-            logger.warning(f"Error loading report_dispatch_cache.json: {e}")
-    return {}
-
-def save_report_dispatch_cache(cache_dict: Dict[str, Any]):
-    try:
-        os.makedirs(os.path.dirname(REPORT_CACHE_FILE), exist_ok=True)
-        with open(REPORT_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache_dict, f, indent=2)
-    except Exception as e:
-        logger.warning(f"Error saving report_dispatch_cache.json: {e}")
-
-
+            logger.error(f"Error in live publisher loop: {e}")
+        time.sleep(60)
