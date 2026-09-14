@@ -693,6 +693,57 @@ def generate_performance_report_text(is_midnight: bool = False, target_date_str:
         lines.append("Mario AI Production Suite")
 
     return "\n".join(lines)
+def check_and_dispatch_scheduled_reports(bot_token: str):
+    if not bot_token:
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN") or ""
+    if not bot_token:
+        return
+
+    now_brt = datetime.now(BRT_TZ)
+    today_str = now_brt.strftime("%Y-%m-%d")
+    hour = now_brt.hour
+    minute = now_brt.minute
+
+    channels = {
+        "fifa_goals_ou": os.getenv("TELEGRAM_CHANNEL_FIFA_GOALS_OU") or os.getenv("TELEGRAM_CHANNEL_FIFA_GOALS"),
+        "fifa_asian_handicap": os.getenv("TELEGRAM_CHANNEL_FIFA_ASIAN_HANDICAP") or os.getenv("TELEGRAM_CHANNEL_FIFA_AH"),
+        "fifa_money_line": os.getenv("TELEGRAM_CHANNEL_FIFA_MONEY_LINE") or os.getenv("TELEGRAM_CHANNEL_FIFA_ML"),
+        "ebasket_money_line": os.getenv("TELEGRAM_CHANNEL_EBASKET_MONEY_LINE"),
+        "ebasket_ou": os.getenv("TELEGRAM_CHANNEL_EBASKET_OU")
+    }
+    valid_channels = {k: v for k, v in channels.items() if v}
+
+    cache = load_report_dispatch_cache()
+
+    # 1. Check 12:00 BRT Partial Report (Window: 12:00 to 12:15 BRT)
+    if hour == 12 and 0 <= minute <= 15:
+        if cache.get("last_partial_date") != today_str:
+            report_text = generate_performance_report_text(is_midnight=False)
+            logger.info(f"Triggering 12:00 BRT Partial Report dispatch across {len(valid_channels)} channels...")
+            sent_any = False
+            for ch_key, ch in valid_channels.items():
+                mid = send_telegram_tip(bot_token, ch, report_text, channel_key=ch_key)
+                if mid:
+                    sent_any = True
+            if sent_any or not valid_channels:
+                cache["last_partial_date"] = today_str
+                save_report_dispatch_cache(cache)
+
+    # 2. Check 00:00 BRT Midnight Report (Window: 00:00 to 00:15 BRT)
+    if hour == 0 and 0 <= minute <= 15:
+        if cache.get("last_midnight_date") != today_str:
+            report_text = generate_performance_report_text(is_midnight=True)
+            logger.info(f"Triggering 00:00 BRT Midnight Report dispatch across {len(valid_channels)} channels...")
+            sent_any = False
+            for ch_key, ch in valid_channels.items():
+                mid = send_telegram_tip(bot_token, ch, report_text, channel_key=ch_key)
+                if mid:
+                    sent_any = True
+            if sent_any or not valid_channels:
+                cache["last_midnight_date"] = today_str
+                save_report_dispatch_cache(cache)
+
+
 def run_live_publisher_cycle(engine=None, model_mgr=None, bot_token=None):
     """
     Executes one 30-second live evaluation and publishing cycle across all 5 channels:
@@ -1004,7 +1055,7 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
             if m_str and h is not None and a is not None:
                 db_results[str(m_str)] = (float(h), float(a))
                 
-        # Query core.matches raw_payload for bet365 IDs & scores
+        # Query core.matches raw_payload for recent matches
         cur.execute("SELECT match_id, raw_payload FROM core.matches WHERE raw_payload IS NOT NULL ORDER BY match_start_time DESC LIMIT 1000")
         for m_str, raw in cur.fetchall():
             if isinstance(raw, dict):
@@ -1016,6 +1067,24 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                 if h_g is not None and a_g is not None:
                     db_results[b365_id] = (float(h_g), float(a_g))
                     db_results[str(m_str)] = (float(h_g), float(a_g))
+
+        # Specifically query PostgreSQL core.matches for all pending match IDs in cache
+        pending_ids = list(set([str(v.get("match_id")) for v in cache.values() if isinstance(v, dict) and v.get("match_id")]))
+        for p_id in pending_ids:
+            cur.execute("SELECT match_id, raw_payload FROM core.matches WHERE match_id = %s OR raw_payload::text LIKE %s LIMIT 1", (p_id, f"%{p_id}%"))
+            p_row = cur.fetchone()
+            if p_row and isinstance(p_row[1], dict):
+                p_raw = p_row[1]
+                b365_id = str(p_raw.get("idMatchBet365") or p_row[0])
+                h_obj = p_raw.get("home", {}) if isinstance(p_raw.get("home"), dict) else {}
+                a_obj = p_raw.get("away", {}) if isinstance(p_raw.get("away"), dict) else {}
+                h_g = h_obj.get("goals") if h_obj.get("goals") is not None else h_obj.get("score")
+                a_g = a_obj.get("goals") if a_obj.get("goals") is not None else a_obj.get("score")
+                if h_g is not None and a_g is not None:
+                    db_results[p_id] = (float(h_g), float(a_g))
+                    db_results[b365_id] = (float(h_g), float(a_g))
+                    db_results[str(p_row[0])] = (float(h_g), float(a_g))
+
         conn.close()
     except Exception as db_ex:
         logger.debug(f"PostgreSQL match score query note: {db_ex}")
@@ -1126,52 +1195,4 @@ def save_report_dispatch_cache(cache_dict: Dict[str, Any]):
     except Exception as e:
         logger.warning(f"Error saving report_dispatch_cache.json: {e}")
 
-def check_and_dispatch_scheduled_reports(bot_token: str):
-    if not bot_token:
-        bot_token = os.getenv("TELEGRAM_BOT_TOKEN") or ""
-    if not bot_token:
-        return
 
-    now_brt = datetime.now(BRT_TZ)
-    today_str = now_brt.strftime("%Y-%m-%d")
-    hour = now_brt.hour
-    minute = now_brt.minute
-
-    channels = {
-        "fifa_goals_ou": os.getenv("TELEGRAM_CHANNEL_FIFA_GOALS_OU") or os.getenv("TELEGRAM_CHANNEL_FIFA_GOALS"),
-        "fifa_asian_handicap": os.getenv("TELEGRAM_CHANNEL_FIFA_ASIAN_HANDICAP") or os.getenv("TELEGRAM_CHANNEL_FIFA_AH"),
-        "fifa_money_line": os.getenv("TELEGRAM_CHANNEL_FIFA_MONEY_LINE") or os.getenv("TELEGRAM_CHANNEL_FIFA_ML"),
-        "ebasket_money_line": os.getenv("TELEGRAM_CHANNEL_EBASKET_MONEY_LINE"),
-        "ebasket_ou": os.getenv("TELEGRAM_CHANNEL_EBASKET_OU")
-    }
-    valid_channels = {k: v for k, v in channels.items() if v}
-
-    cache = load_report_dispatch_cache()
-
-    # 1. Check 12:00 BRT Partial Report (Window: 12:00 to 12:15 BRT)
-    if hour == 12 and 0 <= minute <= 15:
-        if cache.get("last_partial_date") != today_str:
-            report_text = generate_performance_report_text(is_midnight=False)
-            logger.info(f"Triggering 12:00 BRT Partial Report dispatch across {len(valid_channels)} channels...")
-            sent_any = False
-            for ch_key, ch in valid_channels.items():
-                mid = send_telegram_tip(bot_token, ch, report_text, channel_key=ch_key)
-                if mid:
-                    sent_any = True
-            if sent_any or not valid_channels:
-                cache["last_partial_date"] = today_str
-                save_report_dispatch_cache(cache)
-
-    # 2. Check 00:00 BRT Midnight Report (Window: 00:00 to 00:15 BRT)
-    if hour == 0 and 0 <= minute <= 15:
-        if cache.get("last_midnight_date") != today_str:
-            report_text = generate_performance_report_text(is_midnight=True)
-            logger.info(f"Triggering 00:00 BRT Midnight Report dispatch across {len(valid_channels)} channels...")
-            sent_any = False
-            for ch_key, ch in valid_channels.items():
-                mid = send_telegram_tip(bot_token, ch, report_text, channel_key=ch_key)
-                if mid:
-                    sent_any = True
-            if sent_any or not valid_channels:
-                cache["last_midnight_date"] = today_str
-                save_report_dispatch_cache(cache)
