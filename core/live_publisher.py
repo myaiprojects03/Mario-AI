@@ -178,8 +178,8 @@ def update_telegram_tip_result(bot_token: str, channel_id: str, message_id: int,
         "WON": "✅ Won",
         "LOSS": "❌ Lost",
         "LOST": "❌ Lost",
-        "HALF_WIN": "Half Won",
-        "HALF_LOSS": "Half Lost",
+        "HALF_WIN": "✅ Won (Half)",
+        "HALF_LOSS": "❌ Lost (Half)",
         "VOID": "Void",
         "CANCELLED": "Cancelled",
         "POSTPONED": "Postponed",
@@ -833,32 +833,47 @@ def run_live_publisher_cycle(engine=None, model_mgr=None, bot_token=None):
             # Extract live market odds & selection details
             odds_val = 1.90
             pick_str = "Selection"
+            line_val = 2.5
+            side_val = "over"
+            MIN_ODDS = 1.60
 
             if m_key == "fifa_goals_ou":
                 ou = odds_dict.get("over_under", {}) if isinstance(odds_dict.get("over_under"), dict) else {}
-                line = ou.get("line", 2.5)
+                line_val = float(ou.get("line", 2.5))
                 odds_val = float(ou.get("over", 1.90))
-                pick_str = f"Mais de {line} Gols"
+                side_val = "over"
+                pick_str = f"Mais de {line_val} Gols"
             elif m_key == "fifa_asian_handicap":
                 ah = odds_dict.get("asian_handicap", {}) if isinstance(odds_dict.get("asian_handicap"), dict) else {}
-                line = ah.get("line", 0.0)
+                line_val = float(ah.get("line", 0.0))
                 odds_val = float(ah.get("home", 1.90))
-                line_str = f"{line:+.1f}" if line != 0 else "-0.5"
+                side_val = "home"
+                line_str = f"{line_val:+.1f}" if line_val != 0 else "-0.5"
                 pick_str = f"{home_team} (Handicap Asiático {line_str})"
             elif m_key == "fifa_money_line":
                 dnb = odds_dict.get("draw_no_bet", {}) if isinstance(odds_dict.get("draw_no_bet"), dict) else {}
                 odds_val = float(dnb.get("home", odds_dict.get("money_line", {}).get("home", 1.90)))
+                line_val = 0.0
+                side_val = "home"
                 pick_str = f"{home_team} (Empate Anula)"
             elif m_key == "ebasket_money_line":
                 ml = odds_dict.get("money_line", {}) if isinstance(odds_dict.get("money_line"), dict) else {}
                 odds_val = float(ml.get("home", 1.90))
+                line_val = 0.0
+                side_val = "home"
                 pick_str = f"{home_team} (Resultado Final)"
             elif m_key == "ebasket_ou":
                 ou = odds_dict.get("over_under", {}) if isinstance(odds_dict.get("over_under"), dict) else {}
-                line = ou.get("line", 154.5)
+                line_val = float(ou.get("line", 154.5))
                 odds_val = float(ou.get("over", 1.90))
-                pick_str = f"Mais de {line} Pontos"
+                side_val = "over"
+                pick_str = f"Mais de {line_val} Pontos"
             else:
+                continue
+
+            # Enforce Minimum Odds Floor
+            if odds_val < MIN_ODDS:
+                logger.info(f"Skipping tip for {m_key}: odds {odds_val:.2f} below floor {MIN_ODDS}")
                 continue
 
             header_title = channel_headers.get(m_key, "Matrix AI Production Suite")
@@ -887,8 +902,8 @@ def run_live_publisher_cycle(engine=None, model_mgr=None, bot_token=None):
                     "token": bot_token,
                     "bot_token": bot_token,
                     "msg_text": msg_text,
-                    "side": "over" if "over" in m_key or "Mais" in pick_str else "home",
-                    "line": 2.5
+                    "side": side_val,
+                    "line": float(line_val)
                 }
                 save_published_tips_cache(cache)
                 logger.info(f"Successfully dispatched tip for {home_team} vs {away_team} to {m_key} channel.")
@@ -899,6 +914,48 @@ def run_live_publisher_cycle(engine=None, model_mgr=None, bot_token=None):
         check_and_dispatch_scheduled_reports(bot_token)
     except Exception as report_ex:
         logger.warning(f"Error checking/dispatching scheduled reports: {report_ex}")
+
+
+def evaluate_match_result(t_type: str, side: str, line: float, h_score: float, a_score: float) -> str:
+    """Accurately calculates tip result status including Asian quarter lines (HALF_WIN / HALF_LOSS)."""
+    t_type = str(t_type or "").lower()
+    side = str(side or "").lower()
+
+    if "ou" in t_type:
+        total = h_score + a_score
+        diff = (total - line) if side == "over" else (line - total)
+        if diff > 0.25 + 1e-5:
+            return "WIN"
+        elif abs(diff - 0.25) <= 1e-4:
+            return "HALF_WIN"
+        elif abs(diff) <= 1e-4:
+            return "VOID"
+        elif abs(diff + 0.25) <= 1e-4:
+            return "HALF_LOSS"
+        else:
+            return "LOSS"
+
+    elif "ah" in t_type:
+        diff = (h_score - a_score + line) if side == "home" else (a_score - h_score + line)
+        if diff > 0.25 + 1e-5:
+            return "WIN"
+        elif abs(diff - 0.25) <= 1e-4:
+            return "HALF_WIN"
+        elif abs(diff) <= 1e-4:
+            return "VOID"
+        elif abs(diff + 0.25) <= 1e-4:
+            return "HALF_LOSS"
+        else:
+            return "LOSS"
+
+    elif "ml" in t_type or "money_line" in t_type:
+        if side == "home":
+            return "WIN" if h_score > a_score else ("VOID" if h_score == a_score else "LOSS")
+        else:
+            return "WIN" if a_score > h_score else ("VOID" if h_score == a_score else "LOSS")
+
+    return "LOSS"
+
 
 
 def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
@@ -969,45 +1026,16 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
             h_score = float(scores.get("home") or scores.get("homeScore") or 0)
             a_score = float(scores.get("away") or scores.get("awayScore") or 0)
             t_type = str(info.get("type", "")).lower()
-            side = str(info.get("side", "")).lower()
-            line = float(info.get("line", 2.5))
-
-            if t_type in ["fifa_ou", "ebasket_ou", "fifa_goals_ou", "ebasket_ou"]:
-                total = h_score + a_score
-                res_status = "WIN" if (total > line if side == "over" else total < line) else ("VOID" if total == line else "LOSS")
-            elif t_type in ["fifa_ml", "ebasket_ml", "fifa_money_line", "ebasket_money_line"]:
-                res_status = "WIN" if h_score > a_score else ("VOID" if h_score == a_score else "LOSS")
-            elif t_type in ["fifa_ah", "fifa_asian_handicap"]:
-                diff = h_score - a_score + line
-                if diff > 0.25:
-                    res_status = "WIN"
-                elif abs(diff - 0.25) < 1e-5:
-                    res_status = "HALF_WIN"
-                elif abs(diff) < 1e-5:
-                    res_status = "VOID"
-                elif abs(diff + 0.25) < 1e-5:
-                    res_status = "HALF_LOSS"
-                else:
-                    res_status = "LOSS"
+            side = str(info.get("side", "over" if "ou" in t_type else "home")).lower()
+            line = float(info.get("line", 2.5 if "ou" in t_type else 0.0))
+            res_status = evaluate_match_result(t_type, side, line, h_score, a_score)
 
         elif m_id in db_results:
             h_score, a_score = db_results[m_id]
             t_type = str(info.get("type", "")).lower()
-            side = str(info.get("side", "")).lower()
-            line = float(info.get("line", 2.5))
-
-            if "ou" in t_type:
-                total = h_score + a_score
-                res_status = "WIN" if (total > line if side == "over" else total < line) else ("VOID" if total == line else "LOSS")
-            elif "ml" in t_type:
-                res_status = "WIN" if h_score > a_score else ("VOID" if h_score == a_score else "LOSS")
-            elif "ah" in t_type:
-                diff = h_score - a_score + line
-                res_status = "WIN" if diff > 0 else ("VOID" if diff == 0 else "LOSS")
-
-        elif elapsed_mins >= max_duration:
-            # Elapsed match completion fallback settlement from backup engine
-            res_status = "WIN" if (hash(m_id) % 100) < 72 else "LOSS"
+            side = str(info.get("side", "over" if "ou" in t_type else "home")).lower()
+            line = float(info.get("line", 2.5 if "ou" in t_type else 0.0))
+            res_status = evaluate_match_result(t_type, side, line, h_score, a_score)
 
         if res_status:
             ok = update_telegram_tip_result(tok, ch, mid, msg_text, res_status)
