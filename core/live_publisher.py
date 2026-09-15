@@ -939,6 +939,9 @@ def run_live_publisher_cycle(bot_token: Optional[str] = None):
                 cache[save_key] = {
                     "match_id": match_id,
                     "type": m_key,
+                    "sport": "ebasket" if "ebasket" in m_key else "fifa",
+                    "home_player": home_player,
+                    "away_player": away_player,
                     "published_at_utc": now_utc.isoformat(),
                     "msg_id": msg_id,
                     "channel_id": channel_id,
@@ -1005,29 +1008,73 @@ def evaluate_match_result(t_type: str, side: str, line: float, h_score: float, a
 
 
 def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
-    """Checks pending published tips and updates Telegram results if match finished using PostgreSQL database scores."""
+    """Checks pending published tips and updates Telegram results if match finished using live API and PostgreSQL."""
     if not cache:
         cache = load_published_tips_cache()
     if not cache:
         return
 
+    if client is None:
+        try:
+            client = JarBetClient()
+        except Exception:
+            client = None
+
     now_dt = datetime.now(timezone.utc)
     db_results = {}
 
-    # Load audit data score sources
-    audit_data = load_all_tip_history()
-    if audit_data:
-        for rec in audit_data:
-            m_str = str(rec.get("match_id") or rec.get("id") or "")
-            h = rec.get("final_home_score") if rec.get("final_home_score") is not None else rec.get("home_score")
-            a = rec.get("final_away_score") if rec.get("final_away_score") is not None else rec.get("away_score")
-            if m_str and h is not None and a is not None:
-                try:
-                    db_results[m_str] = (float(h), float(a))
-                except (ValueError, TypeError):
-                    pass
+    # 1. Query live JarvisBet player history endpoints for pending matches
+    if client:
+        queried_players = set()
+        for key, info in cache.items():
+            if not isinstance(info, dict):
+                continue
+            h_p = str(info.get("home_player") or "").strip()
+            a_p = str(info.get("away_player") or "").strip()
+            msg_t = str(info.get("msg_text") or "")
+            sport = str(info.get("sport") or ("ebasket" if "ebasket" in str(info.get("type")) else "fifa"))
 
-    # Query PostgreSQL database core.results and core.matches with multi-host fallback
+            # Extract player from parenthesized text if needed, e.g. "Teams/Match: Real Madrid (KraftVK) x Liverpool (Bomb1to)"
+            candidates = [p for p in [h_p, a_p] if p]
+            if not candidates and "Teams/Match:" in msg_t:
+                found = re.findall(r'\(([^)]+)\)', msg_t)
+                for f_name in found:
+                    if len(f_name.strip()) > 1:
+                        candidates.append(f_name.strip())
+
+            endpoint = "/history/pre" if sport == "fifa" else "/history/ebasket/pre"
+            for player in candidates:
+                if player in queried_players or not player:
+                    continue
+                queried_players.add(player)
+                try:
+                    resp = client._execute_request("GET", endpoint, params={"homeName": player})
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        matches = data.get("matches", data) if isinstance(data, dict) else data
+                        if isinstance(matches, list):
+                            for m in matches:
+                                if not isinstance(m, dict):
+                                    continue
+                                b365_id = str(m.get("idMatchBet365") or "")
+                                m_id = str(m.get("_id") or "")
+                                home_obj = m.get("home", {}) if isinstance(m.get("home"), dict) else {}
+                                away_obj = m.get("away", {}) if isinstance(m.get("away"), dict) else {}
+                                h_g = home_obj.get("goals") if home_obj.get("goals") is not None else home_obj.get("score")
+                                a_g = away_obj.get("goals") if away_obj.get("goals") is not None else away_obj.get("score")
+                                if h_g is not None and a_g is not None:
+                                    try:
+                                        score_pair = (float(h_g), float(a_g))
+                                        if b365_id:
+                                            db_results[b365_id] = score_pair
+                                        if m_id:
+                                            db_results[m_id] = score_pair
+                                    except (ValueError, TypeError):
+                                        pass
+                except Exception as api_err:
+                    logger.debug(f"History query note for player {player}: {api_err}")
+
+    # 2. Query PostgreSQL database core.results and core.matches with multi-host fallback
     try:
         import psycopg2
         from core.config.settings import settings
@@ -1085,11 +1132,10 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                         db_results[str(p_row[0])] = (float(h_g), float(a_g))
 
             conn.close()
-        else:
-            logger.warning("Could not connect to PostgreSQL database for settlement.")
     except Exception as db_ex:
-        logger.warning(f"PostgreSQL match score query note: {db_ex}")
+        logger.debug(f"PostgreSQL score query note: {db_ex}")
 
+    # 3. Settle all pending tips matching score results
     keys_to_settle = list(cache.keys())
     for key in keys_to_settle:
         info = cache.get(key)
@@ -1121,7 +1167,7 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
             ok = update_telegram_tip_result(tok, ch, mid, msg_text, res_status)
             if ok:
                 status_label = "✅ Won" if res_status == "WIN" else ("❌ Lost" if res_status == "LOSS" else "Void")
-                logger.info(f"SETTLED TIP: Match {m_id} -> {status_label} (Edited Msg {mid})")
+                logger.info(f"SETTLED TIP: Match {m_id} -> {status_label} (Score: {h_score}-{a_score}) (Edited Msg {mid})")
                 del cache[key]
                 save_published_tips_cache(cache)
 
