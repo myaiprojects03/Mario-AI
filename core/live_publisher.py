@@ -1,7 +1,3 @@
-import threading
-import uvicorn
-import json
-LIVE_AUDIT_LOG_LIST = []
 """
 Core Live Publisher & Telegram Tip Dispatcher.
 Evaluates all 5 production models in production_models/ and dispatches live tips to Telegram channels via direct HTTP API.
@@ -10,28 +6,38 @@ Evaluates all 5 production models in production_models/ and dispatches live tips
 import os
 import sys
 import time
+import json
+import re
+import threading
 import logging
 from datetime import datetime, timezone, timedelta
-BRT_TZ = timezone(timedelta(hours=-3))
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Set
 
 import joblib
 import numpy as np
 import pandas as pd
 import polars as pl
 import requests
+import psycopg2
+import uvicorn
+
 from sqlalchemy import create_engine, text
 from alembic.config import Config
 from alembic import command
 
 sys.path.insert(0, ".")
 from core.config.settings import settings
+from core.ingestion.jarbet_client import JarBetClient
+from core.dashboard.dashboard_app import app
 from markets.fifa_goals_ou.features import build_fifa_goals_ou_features
 from markets.fifa_asian_handicap.v3_multiline_kelly_filtering.features import build_fifa_ah_v3_features
 from markets.fifa_money_line.v3_dnb_synthetic_features.features import build_fifa_ml_v3_features
 from markets.ebasket_money_line.v3_dnb_synthetic_features.features import build_ebasket_ml_v3_features
 from markets.ebasket_ou.v3_multiline_kelly_filtering.features import build_ebasket_ou_v3_features
 from markets._shared.multiline_v3_features import calculate_quarter_kelly_stake
+
+BRT_TZ = timezone(timedelta(hours=-3))
+LIVE_AUDIT_LOG_LIST = []
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("live_publisher")
@@ -347,8 +353,7 @@ def load_all_tip_history() -> List[Dict[str, Any]]:
 
     db_results = {}
     try:
-        from sqlalchemy import create_engine, text
-        from core.config.settings import settings
+
         if settings.DATABASE_URL:
             engine = create_engine(settings.DATABASE_URL)
             with engine.connect() as conn:
@@ -781,7 +786,7 @@ def run_live_publisher_cycle(bot_token: Optional[str] = None):
     fifa_matches = []
     ebasket_matches = []
     try:
-        from core.ingestion.jarbet_client import JarBetClient
+
         client = JarBetClient()
         try:
             fifa_matches = client.get_fifa_pre() or []
@@ -940,8 +945,8 @@ def run_live_publisher_cycle(bot_token: Optional[str] = None):
                     "match_id": match_id,
                     "type": m_key,
                     "sport": "ebasket" if "ebasket" in m_key else "fifa",
-                    "home_player": home_player,
-                    "away_player": away_player,
+                    "home_player": h_player,
+                    "away_player": a_player,
                     "published_at_utc": now_utc.isoformat(),
                     "msg_id": msg_id,
                     "channel_id": channel_id,
@@ -1076,8 +1081,7 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
 
     # 2. Query PostgreSQL database core.results and core.matches with multi-host fallback
     try:
-        import psycopg2
-        from core.config.settings import settings
+
         db_urls = []
         if os.getenv("DATABASE_URL"):
             db_urls.append(os.getenv("DATABASE_URL"))
@@ -1174,8 +1178,7 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
 
 def start_dashboard_server():
     try:
-        from core.dashboard.dashboard_app import app
-        import uvicorn
+
         port = int(os.getenv("DASHBOARD_PORT", "8000"))
         uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
     except Exception as e:
@@ -1185,7 +1188,7 @@ def start_dashboard_server():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     logger.info("Starting live publisher standalone service...")
-    import time
+
     while True:
         try:
             run_live_publisher_cycle()
