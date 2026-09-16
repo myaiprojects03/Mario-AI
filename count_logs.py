@@ -76,34 +76,29 @@ def parse_timestamp_to_brt(ts_val) -> datetime:
         return datetime.now(BRT_TZ)
     if isinstance(ts_val, (int, float)):
         return datetime.fromtimestamp(ts_val, tz=UTC_TZ).astimezone(BRT_TZ)
-    
+
     ts_str = str(ts_val).strip()
     if ts_str.endswith("Z"):
+        ts_str = ts_str.replace("Z", "+00:00")
+
+    try:
+        dt = datetime.fromisoformat(ts_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC_TZ if ("T" in ts_str or "UTC" in ts_str) else BRT_TZ)
+        return dt.astimezone(BRT_TZ)
+    except Exception:
+        pass
+
+    # Extract YYYY-MM-DD HH:MM:SS directly via regex
+    m = re.search(r"(\d{4}-\d{2}-\d{2})[T\s](\d{2}:\d{2}:\d{2})", ts_str)
+    if m:
         try:
-            return datetime.fromisoformat(ts_str.replace("Z", "+00:00")).astimezone(BRT_TZ)
+            dt = datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M:%S")
+            dt = dt.replace(tzinfo=UTC_TZ if ("T" in ts_str or "UTC" in ts_str) else BRT_TZ)
+            return dt.astimezone(BRT_TZ)
         except Exception:
             pass
-            
-    for fmt in [
-        "%Y-%m-%dT%H:%M:%S%z",
-        "%Y-%m-%d %H:%M:%S%z",
-        "%Y-%m-%dT%H:%M:%S.%f%z",
-        "%Y-%m-%d %H:%M:%S.%f%z",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d %H:%M",
-        "%Y-%m-%d"
-    ]:
-        try:
-            dt = datetime.strptime(ts_str[:26], fmt[:len(ts_str[:26])])
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=UTC_TZ if ("T" in ts_str or "UTC" in ts_str) else BRT_TZ).astimezone(BRT_TZ)
-            else:
-                dt = dt.astimezone(BRT_TZ)
-            return dt
-        except Exception:
-            continue
-            
+
     return datetime.now(BRT_TZ)
 
 def match_channel_key(text: str) -> str:
@@ -272,7 +267,8 @@ def analyze_span(target_date_input: str = "today"):
             "ledger": []
         }
 
-    # Extract Settled Outcomes from live Docker logs within span
+    # Extract Settled Outcomes & Published Tips from live Docker logs within span
+    seen_ids = {str(item.get("msg_id") or item.get("match_id") or item.get("id")) for item in audit_items if isinstance(item, dict)}
     settled_from_logs = {}
     for line in docker_lines:
         line_low = line.lower()
@@ -295,6 +291,31 @@ def analyze_span(target_date_input: str = "today"):
                         stats[k]["min_odds_rejected"] += 1
                     if "duplicate" in line_low:
                         stats[k]["duplicates_prevented"] += 1
+
+            # Also parse published tips directly from Docker logs
+            if "published live tip to telegram channel" in line_low:
+                ch_m = re.search(r"channel\s+(-?[0-9]+)", line, re.IGNORECASE)
+                msg_m = re.search(r"message id:\s*([0-9]+)", line, re.IGNORECASE)
+                ch_id_str = ch_m.group(1) if ch_m else ""
+                msg_id_str = msg_m.group(1) if msg_m else "LOG"
+                c_k = match_channel_key(f"{ch_id_str} {line}")
+                
+                # Synthetic item for docker log published tip
+                log_tip_id = f"docker_{msg_id_str}"
+                if log_tip_id not in seen_ids:
+                    audit_items.append({
+                        "match_id": msg_id_str,
+                        "type": c_k,
+                        "market_name": CHANNEL_CONFIG[c_k]["name"],
+                        "channel_id": ch_id_str,
+                        "msg_id": msg_id_str,
+                        "timestamp": dt_line.isoformat() if dt_line else datetime.now(BRT_TZ).isoformat(),
+                        "fixture": "Live Match (From Docker Log)",
+                        "pick": "Selection",
+                        "odds": 1.85,
+                        "result": "PENDING"
+                    })
+                    seen_ids.add(log_tip_id)
 
             if "settled tip:" in line_low or "updated telegram tip" in line_low:
                 m_match = re.search(r"match\s+([0-9a-zA-Z_-]+)", line, re.IGNORECASE)
@@ -340,7 +361,7 @@ def analyze_span(target_date_input: str = "today"):
                     stats[c_key]["mtd_net_units"] -= 1.0
             continue
 
-        c_key = match_channel_key(f"{item.get('market_name', '')} {item.get('channel_id', '')} {item.get('msg_text', '')}")
+        c_key = match_channel_key(f"{item.get('type', '')} {item.get('market_name', '')} {item.get('channel_id', '')} {item.get('channel', '')} {item.get('msg_text', '')}")
         s = stats[c_key]
 
         match_id = str(item.get("match_id") or item.get("id") or "N/A")
