@@ -24,13 +24,6 @@ import argparse
 from datetime import datetime, timezone, timedelta
 import zoneinfo
 
-# Ensure UTF-8 stdout encoding across all OS platforms
-if hasattr(sys.stdout, "reconfigure"):
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
-
 BRT_TZ = zoneinfo.ZoneInfo("America/Sao_Paulo")
 UTC_TZ = timezone.utc
 
@@ -80,6 +73,7 @@ def parse_iso_or_brt_timestamp(ts_val) -> datetime:
         return datetime.fromtimestamp(ts_val, tz=UTC_TZ).astimezone(BRT_TZ)
     
     ts_str = str(ts_val).strip()
+    # Handle ISO format with Z
     if ts_str.endswith("Z"):
         try:
             dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
@@ -87,6 +81,7 @@ def parse_iso_or_brt_timestamp(ts_val) -> datetime:
         except Exception:
             pass
             
+    # Try standard ISO or space-separated
     for fmt in [
         "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%d %H:%M:%S%z",
@@ -98,6 +93,7 @@ def parse_iso_or_brt_timestamp(ts_val) -> datetime:
         try:
             dt = datetime.strptime(ts_str[:19], fmt[:len(ts_str[:19])])
             if dt.tzinfo is None:
+                # Assume BRT if local timestamp without offset, or UTC if ISO with T
                 if "T" in ts_str:
                     dt = dt.replace(tzinfo=UTC_TZ).astimezone(BRT_TZ)
                 else:
@@ -120,12 +116,14 @@ def match_channel(item: dict) -> str:
     title = str(item.get("header_title") or item.get("title") or "").lower()
     pick = str(item.get("pick") or "").lower()
     
+    # Direct match on keywords
     for key, cfg in CHANNEL_CONFIG.items():
         if any(kw in market for kw in cfg["keywords"]):
             return key
         if any(kw in title for kw in cfg["keywords"]):
             return key
             
+    # Heuristics based on pick content
     if "over" in pick or "under" in pick or "o/u" in pick or "goals" in market:
         if "ebasket" in market or "basketball" in market:
             return "ebasket_ou"
@@ -142,7 +140,7 @@ def match_channel(item: dict) -> str:
 def load_all_sources(base_dir: str = None):
     """Loads live audit logs, persistent publisher cache, and app logs."""
     if not base_dir:
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "."))
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         
     candidates = [
         base_dir,
@@ -158,6 +156,7 @@ def load_all_sources(base_dir: str = None):
     cache_data = {}
     report_cache = {}
     
+    # 1. Load live_audit_log.json
     for path in candidates:
         fpath = os.path.join(path, "live_audit_log.json")
         if os.path.exists(fpath):
@@ -170,6 +169,7 @@ def load_all_sources(base_dir: str = None):
             except Exception:
                 pass
                 
+    # 2. Load published_tips_cache.json
     for path in candidates:
         fpath = os.path.join(path, "published_tips_cache.json")
         if os.path.exists(fpath):
@@ -180,6 +180,7 @@ def load_all_sources(base_dir: str = None):
             except Exception:
                 pass
                 
+    # 3. Load report_dispatch_cache.json
     for path in candidates:
         fpath = os.path.join(path, "report_dispatch_cache.json")
         if os.path.exists(fpath):
@@ -193,6 +194,7 @@ def load_all_sources(base_dir: str = None):
     return audit_data, cache_data, report_cache
 
 def parse_log_file_for_telemetry(log_file_path: str, target_date_brt_str: str):
+    """Parses application stdout/log files for blocked tips, min odds rejections, and deduplication events."""
     telemetry = {
         "blocked_tips": {k: [] for k in CHANNEL_CONFIG},
         "odds_rejected_count": {k: 0 for k in CHANNEL_CONFIG},
@@ -207,27 +209,32 @@ def parse_log_file_for_telemetry(log_file_path: str, target_date_brt_str: str):
     try:
         with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
+                # Check for limit cap block
                 if "Daily limit reached" in line or "daily cap reached" in line or "Skipping tip due to cap" in line:
                     for k, cfg in CHANNEL_CONFIG.items():
                         if k in line or cfg["name"].lower() in line.lower() or cfg["short_code"].lower() in line.lower():
                             telemetry["blocked_tips"][k].append(line.strip())
                             break
                             
+                # Check for minimum odds rejections
                 if "odds" in line.lower() and ("below minimum" in line.lower() or "rejected" in line.lower() or "filtered" in line.lower()):
                     for k, cfg in CHANNEL_CONFIG.items():
                         if k in line or cfg["name"].lower() in line.lower():
                             telemetry["odds_rejected_count"][k] += 1
                             break
                             
+                # Check for duplicate skips
                 if "Duplicate tip" in line or "already published" in line or "duplicate skipped" in line:
                     for k, cfg in CHANNEL_CONFIG.items():
                         if k in line or cfg["name"].lower() in line.lower():
                             telemetry["duplicates_skipped"][k] += 1
                             break
                             
+                # Check for midnight resets
                 if "Midnight BRT reset" in line or "daily counters reset" in line or "Resetting daily publication counters" in line:
                     telemetry["midnight_resets"].append(line.strip())
                     
+                # Check container startup
                 if "Starting Mario AI Live Publisher" in line or "Live Publisher initialized" in line:
                     telemetry["restart_events"].append(line.strip())
     except Exception as e:
@@ -239,12 +246,14 @@ def build_audit_report(target_date_str: str, log_file: str = None) -> dict:
     audit_items, cache_data, report_cache = load_all_sources()
     telemetry = parse_log_file_for_telemetry(log_file, target_date_str)
     
+    # If target_date_str is None or "today", determine current BRT date
     now_brt = datetime.now(BRT_TZ)
     if not target_date_str or target_date_str.lower() in ["today", "current", "auto"]:
         target_date_str = now_brt.strftime("%Y-%m-%d")
         
     target_month_str = target_date_str[:7]
     
+    # Initialize channel metrics
     channel_stats = {}
     for c_key, cfg in CHANNEL_CONFIG.items():
         channel_stats[c_key] = {
@@ -253,6 +262,7 @@ def build_audit_report(target_date_str: str, log_file: str = None) -> dict:
             "daily_cap": cfg["daily_cap"],
             "min_odds": cfg["min_odds"],
             
+            # Message Separation Categories
             "new_tips_count": 0,
             "result_updates_count": 0,
             "duplicates_prevented": telemetry["duplicates_skipped"].get(c_key, 0),
@@ -261,6 +271,7 @@ def build_audit_report(target_date_str: str, log_file: str = None) -> dict:
             "other_notifications": 0,
             "total_telegram_messages": 0,
             
+            # Settlement Performance for Target Date
             "settled_wins": 0.0,
             "settled_losses": 0.0,
             "settled_voids": 0.0,
@@ -270,20 +281,25 @@ def build_audit_report(target_date_str: str, log_file: str = None) -> dict:
             "daily_staked_units": 0.0,
             "pending_count": 0,
             
+            # Month-to-Date Performance
             "mtd_wins": 0.0,
             "mtd_losses": 0.0,
             "mtd_voids": 0.0,
             "mtd_net_units": 0.0,
             "mtd_staked_units": 0.0,
             
+            # Limit Audit & Blocked Tip
             "first_blocked_tip": None,
             "min_odds_rejected": telemetry["odds_rejected_count"].get(c_key, 0),
             
+            # Detailed Ledgers
             "ledger": [],
             "pending_examples": [],
             "settled_examples": []
         }
 
+    # Count scheduled reports from cache or defaults
+    # Standard schedule: 1 Partial (12:00 BRT) + 1 Midnight (00:00 BRT)
     if report_cache.get("last_partial_date") == target_date_str:
         for k in channel_stats:
             channel_stats[k]["scheduled_reports"] += 1
@@ -293,6 +309,10 @@ def build_audit_report(target_date_str: str, log_file: str = None) -> dict:
             channel_stats[k]["scheduled_reports"] += 1
             channel_stats[k]["total_telegram_messages"] += 1
 
+    # Extract distinct tips from audit log & cache
+    processed_msg_ids = set()
+    
+    # Process audit data
     for item in audit_items:
         raw_ts = item.get("timestamp") or item.get("published_at_utc") or item.get("created_at") or ""
         dt_brt = parse_iso_or_brt_timestamp(raw_ts)
@@ -303,6 +323,7 @@ def build_audit_report(target_date_str: str, log_file: str = None) -> dict:
         m_name = str(item.get("market_name") or item.get("market") or "")
         title = str(item.get("header_title") or item.get("title") or "")
         
+        # Filter test or scheduled report items inside audit log
         if "Performance Report" in fix or "Performance Report" in m_name or "Performance Report" in title:
             if brt_date_str == target_date_str:
                 for k in channel_stats:
@@ -338,6 +359,7 @@ def build_audit_report(target_date_str: str, log_file: str = None) -> dict:
         stake = 1.0
         net = 0.0
         
+        # Settle math
         if any(w in res for w in ["WIN", "WON"]):
             if "HALF" in res:
                 net = 0.5 * (odds_val - 1.0)
@@ -370,7 +392,7 @@ def build_audit_report(target_date_str: str, log_file: str = None) -> dict:
             stats["daily_net_units"] += net
             if "PENDING" not in res:
                 stats["daily_staked_units"] += stake
-                stats["result_updates_count"] += 1
+                stats["result_updates_count"] += 1  # in-place Telegram message edit
                 
             stats["new_tips_count"] += 1
             stats["total_telegram_messages"] += 1
@@ -395,6 +417,7 @@ def build_audit_report(target_date_str: str, log_file: str = None) -> dict:
                 if len(stats["settled_examples"]) < 3:
                     stats["settled_examples"].append(entry)
                     
+            # Check if this tip pushed channel past cap
             if stats["new_tips_count"] > stats["daily_cap"] and not stats["first_blocked_tip"]:
                 stats["first_blocked_tip"] = {
                     "timestamp_brt": brt_time_formatted,
@@ -416,6 +439,7 @@ def build_audit_report(target_date_str: str, log_file: str = None) -> dict:
             elif any(w in res for w in ["VOID", "PUSH"]):
                 stats["mtd_voids"] += 1.0
 
+    # If first blocked tip not found in audit (because publisher blocked before saving), check telemetry
     for c_key, blocked_logs in telemetry["blocked_tips"].items():
         if blocked_logs and not channel_stats[c_key]["first_blocked_tip"]:
             first_log = blocked_logs[0]
@@ -449,6 +473,9 @@ def format_markdown_report(report: dict) -> str:
     out.append(f"**Generated At:** `{gen_ts}`  ")
     out.append(f"**Target System:** Mario AI Live Publisher Production Suite  \n")
     
+    # -------------------------------------------------------------------------
+    # Section 1: Clarification of Historical vs. 24-Hour Brazil-Time Figures
+    # -------------------------------------------------------------------------
     out.append("## 1. Clarification of Historical vs. 24-Hour Figures\n")
     out.append("> [!NOTE]")
     out.append("> **Root Cause of Prior Figures (466 AH / 344 ML):**")
@@ -456,6 +483,9 @@ def format_markdown_report(report: dict) -> str:
     out.append("> 2. **Pre-Deployment Uncapped Logs:** Prior to the deployment of the strict in-memory & persistent publisher cap, the engine ran continuously without an automated 24h kill-switch.")
     out.append("> 3. **Strict Capping Verification:** Under the active architecture, daily counters strictly reset at **00:00:00 BRT**, are verified before each dispatch, and persist to `published_tips_cache.json` across container restarts.\n")
 
+    # -------------------------------------------------------------------------
+    # Section 2: Channel-by-Channel Message Separation Table
+    # -------------------------------------------------------------------------
     out.append("## 2. Channel-by-Channel Message Separation Audit\n")
     out.append("Below is the complete breakdown separating newly published tips, in-place result updates, duplicates prevented, scheduled reports, and total Telegram messages for the 24-hour Brazil-time cycle.\n")
     out.append("| Channel Name | Configured Daily Limit | 1. Newly Published Tips | 2. In-Place Result Updates (Edits) | 3. Duplicates Prevented | 4. Test Messages | 5. Scheduled Reports (12:00 & 00:00 BRT) | 6. Other Alerts | 7. Total Telegram Messages |")
@@ -463,11 +493,14 @@ def format_markdown_report(report: dict) -> str:
     
     for k, s in stats.items():
         limit_badge = f"**{s['daily_cap']}**"
-        new_tips_badge = f"**{s['new_tips_count']}**" if s['new_tips_count'] <= s['daily_cap'] else f"[OVER CAP] **{s['new_tips_count']}**"
+        new_tips_badge = f"**{s['new_tips_count']}**" if s['new_tips_count'] <= s['daily_cap'] else f"⚠️ **{s['new_tips_count']} (OVER CAP)**"
         out.append(f"| **{s['name']}** | {limit_badge} | {new_tips_badge} | {s['result_updates_count']} (edits) | {s['duplicates_prevented']} | {s['test_messages']} | {s['scheduled_reports']} | {s['other_notifications']} | **{s['total_telegram_messages']}** |")
         
     out.append("\n*Note: Result updates are executed as in-place edits to existing Telegram messages (`editMessageText`), ensuring zero channel clutter while keeping the total new message volume strictly bounded.*\n")
 
+    # -------------------------------------------------------------------------
+    # Section 3: Limit Enforcement, First Blocked Tip & Midnight Reset
+    # -------------------------------------------------------------------------
     out.append("## 3. Daily Limit Enforcement, Midnight Reset & Restart Resilience\n")
     out.append("### A. First Candidate Tip Blocked After Limit Reached")
     out.append("| Channel | Configured Cap | Tips Published | Cap Status | First Tip Blocked / Suppressed |")
@@ -493,6 +526,9 @@ def format_markdown_report(report: dict) -> str:
     out.append("- **Restart Behavior:** On container boot or restart, `published_tips_cache.json` is loaded directly into memory. If the current BRT date matches the cache, active `daily_counts` and deduplication sets (`published_ids`) are fully restored, preventing counter reset on server reboots.")
     out.append("- **Persistence Verification:** `CONFIRMED PASS` - State survives container restarts.\n")
 
+    # -------------------------------------------------------------------------
+    # Section 4: Odds Filter Rejections & Channel Performance Metrics
+    # -------------------------------------------------------------------------
     out.append("## 4. Minimum-Odds Rejection Metrics & Live Performance\n")
     out.append("| Channel Name | Min Odds Filter | Rejected Candidate Tips | Settled Tips | Wins | Losses | Voids | Daily Units (1.0u flat) | Win Rate | Daily ROI | MTD Units |")
     out.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
@@ -510,6 +546,9 @@ def format_markdown_report(report: dict) -> str:
         
         out.append(f"| **{s['name']}** | `{s['min_odds']:.2f}` | {s['min_odds_rejected']} | {total_settled} | {tw_str} | {tl_str} | {tv_str} | **{sign}{s['daily_net_units']:.2f}u** | **{win_rate:.1f}%** | **{roi:+.1f}%** | **{mtd_sign}{s['mtd_net_units']:.2f}u** |")
 
+    # -------------------------------------------------------------------------
+    # Section 5: Verified Message-by-Message Ledger
+    # -------------------------------------------------------------------------
     out.append("\n## 5. Complete Message-by-Message Verification Ledger (Per Channel)\n")
     
     for k, s in stats.items():
@@ -524,11 +563,11 @@ def format_markdown_report(report: dict) -> str:
         for e in s["ledger"]:
             status_badge = f"`{e['result_status']}`"
             if any(w in e['result_status'] for w in ["WIN", "WON"]):
-                status_badge = f"[WON] **{e['result_status']}**"
+                status_badge = f"🟢 **{e['result_status']}**"
             elif any(w in e['result_status'] for w in ["LOSS", "LOST"]):
-                status_badge = f"[LOST] **{e['result_status']}**"
+                status_badge = f"🔴 **{e['result_status']}**"
             elif "PENDING" in e['result_status']:
-                status_badge = f"[PENDING] `{e['result_status']}`"
+                status_badge = f"🟡 `{e['result_status']}`"
                 
             out.append(f"| {e['timestamp_brt']} | `{e['msg_id']}` | `{e['match_id']}` | {e['fixture']} | {e['market_type']} - **{e['pick']}** | `{e['odds']}` | {status_badge} | `{e['log_id']}` |")
         out.append("")
@@ -543,6 +582,7 @@ def main():
     parser.add_argument("--json", action="store_true", help="Print raw JSON output")
     args = parser.parse_args()
 
+    # Determine date
     target_date = args.date
     if target_date == "auto":
         audit_data, _, _ = load_all_sources()
@@ -564,15 +604,13 @@ def main():
 
     md_content = format_markdown_report(report_dict)
     
+    # Save to Markdown
     if args.save_md:
         with open(args.save_md, "w", encoding="utf-8") as f:
             f.write(md_content)
         print(f"\n[OK] Comprehensive 24-Hour Audit Report written to: {os.path.abspath(args.save_md)}\n")
 
-    try:
-        print(md_content)
-    except Exception:
-        print(md_content.encode("ascii", errors="replace").decode("ascii"))
+    print(md_content)
 
 if __name__ == "__main__":
     main()
