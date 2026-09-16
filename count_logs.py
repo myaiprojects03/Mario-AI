@@ -2,15 +2,8 @@
 """
 Production 24-Hour Brazil-Time Comprehensive Audit Utility (count_logs.py)
 ==========================================================================
-Generates the complete 8-part client verification report:
-1. 24-Hour Brazil Time (00:00:00 - 23:59:59 BRT) strict isolation.
-2. 7-Category Message Separation Table (New Tips, Edits, Duplicates, Tests, Reports, Alerts, Total).
-3. Daily Limit Capping & First Blocked Tip after limit reached.
-4. Midnight (00:00 BRT) Reset Confirmation.
-5. Daily Counters & Deduplication Restart Persistence Verification.
-6. Minimum-Odds Rejection Filter Metrics (odds < 1.70).
-7. Live Channel Performance & Metrics (Settled, Won, Lost, Voids, Daily Units, Win Rate %, ROI %, MTD Units).
-8. Message-by-Message Verification Ledger (Timestamp BRT, TG Msg ID, Match ID, Fixture, Pick, Odds, Status, Log ID).
+Pulls live audit data directly from the active Docker container (mario_ai_live_publisher)
+and produces the complete 8-part client verification report.
 """
 
 import os
@@ -19,7 +12,6 @@ import json
 import re
 import argparse
 import subprocess
-from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 import zoneinfo
 
@@ -116,48 +108,47 @@ def load_data_from_all_sources():
     report_cache = {}
     docker_log_lines = []
     
-    candidates = [
-        "core/dashboard/live_audit_log.json",
-        "dashboard/live_audit_log.json",
-        "live_audit_log.json",
-        "/app/core/dashboard/live_audit_log.json",
-        "/root/mario-ai-code/core/dashboard/live_audit_log.json"
-    ]
-    for c in candidates:
-        if os.path.exists(c):
-            try:
-                with open(c, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, list) and data:
-                        audit_items = data
-                        break
-            except Exception:
-                pass
+    # 1. Pull directly from inside the running Docker container (mario_ai_live_publisher)
+    try:
+        cmd = "docker exec mario_ai_live_publisher cat /app/core/dashboard/live_audit_log.json 2>/dev/null || docker exec $(docker ps -q | head -n 1) cat /app/core/dashboard/live_audit_log.json 2>/dev/null"
+        res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+        if res.returncode == 0 and res.stdout.strip():
+            data = json.loads(res.stdout)
+            if isinstance(data, list) and data:
+                audit_items = data
+    except Exception:
+        pass
+
+    # 2. If container cat was empty, fallback to local file paths
+    if not audit_items:
+        candidates = [
+            "core/dashboard/live_audit_log.json",
+            "dashboard/live_audit_log.json",
+            "live_audit_log.json",
+            "/app/core/dashboard/live_audit_log.json",
+            "/root/mario-ai-code/core/dashboard/live_audit_log.json"
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                try:
+                    with open(c, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if isinstance(data, list) and data:
+                            audit_items = data
+                            break
+                except Exception:
+                    pass
                 
-    cache_candidates = [
-        "core/dashboard/published_tips_cache.json",
-        "dashboard/published_tips_cache.json",
-        "/app/core/dashboard/published_tips_cache.json",
-        "/root/mario-ai-code/core/dashboard/published_tips_cache.json"
-    ]
-    for c in cache_candidates:
-        if os.path.exists(c):
-            try:
-                with open(c, "r", encoding="utf-8") as f:
-                    cache_data = json.load(f)
-                    break
-            except Exception:
-                pass
+    # 3. Pull published_tips_cache.json from container
+    try:
+        cmd = "docker exec mario_ai_live_publisher cat /app/core/dashboard/published_tips_cache.json 2>/dev/null || docker exec $(docker ps -q | head -n 1) cat /app/core/dashboard/published_tips_cache.json 2>/dev/null"
+        res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+        if res.returncode == 0 and res.stdout.strip():
+            cache_data = json.loads(res.stdout)
+    except Exception:
+        pass
 
-    for c in ["core/dashboard/report_dispatch_cache.json", "/app/core/dashboard/report_dispatch_cache.json"]:
-        if os.path.exists(c):
-            try:
-                with open(c, "r", encoding="utf-8") as f:
-                    report_cache = json.load(f)
-                    break
-            except Exception:
-                pass
-
+    # 4. Fetch Docker container logs directly
     try:
         cmd = "docker logs mario_ai_live_publisher 2>&1 || docker logs $(docker ps -q | head -n 1) 2>&1"
         res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", timeout=10)
