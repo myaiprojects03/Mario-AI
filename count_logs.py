@@ -9,9 +9,9 @@ Pulls live audit data dynamically from:
 4. PostgreSQL database (docker exec mario_ai_db psql)
 5. Local files on host
 
-Handles dynamic date parsing ('15', '2026-09-15', 'auto', 'today') and aligns UTC
-timestamps to America/Sao_Paulo (BRT 00:00:00 - 23:59:59) so no tips sent to Telegram
-channels are ever missed.
+Accurately extracts all published tips AND settled tip outcomes (Won, Lost, Void)
+from Docker logs, cache, and database, calculating Settled, Won, Lost, Win Rate,
+Daily Net Units, and MTD Units for any date (including '15', '2026-09-15', 'auto').
 """
 
 import os
@@ -57,7 +57,7 @@ CHANNEL_CONFIG = {
     "ebasket_money_line": {
         "name": "eBasket Money Line",
         "short_code": "EBASKET-ML",
-        "channel_ids": ["ebasket_money_line", "ebasket_ml", "ebasketball_ml"],
+        "channel_ids": ["-1004263450744", "ebasket_money_line", "ebasket_ml", "ebasketball_ml"],
         "keywords": ["ebasketball money line", "ebasket ml", "ebasketball ml", "ebasket_money_line", "matrix ebasket pre ml"],
         "daily_cap": 150,
         "min_odds": 1.70
@@ -65,7 +65,7 @@ CHANNEL_CONFIG = {
     "ebasket_ou": {
         "name": "eBasket Over/Under",
         "short_code": "EBASKET-OU",
-        "channel_ids": ["ebasket_ou", "ebasket_over_under", "ebasketball_ou"],
+        "channel_ids": ["-1004452838653", "ebasket_ou", "ebasket_over_under", "ebasketball_ou"],
         "keywords": ["ebasketball over/under", "ebasket ou", "ebasketball ou", "ebasket_ou", "pontos", "points", "matrix ebasket pre o/u"],
         "daily_cap": 150,
         "min_odds": 1.70
@@ -73,9 +73,6 @@ CHANNEL_CONFIG = {
 }
 
 def normalize_target_date(user_input: str, available_dates: set) -> str:
-    """
-    Dynamically normalizes user input ('15', '2026-09-15', 'auto', 'today') to YYYY-MM-DD.
-    """
     now_brt = datetime.now(BRT_TZ)
     current_year = now_brt.strftime("%Y")
     current_month = now_brt.strftime("%m")
@@ -93,20 +90,16 @@ def normalize_target_date(user_input: str, available_dates: set) -> str:
 
     clean_inp = user_input.strip()
     
-    # Check if user entered just day of month, e.g. "15" or "5"
     if clean_inp.isdigit() and 1 <= int(clean_inp) <= 31:
         day_str = f"{int(clean_inp):02d}"
-        # Check if any available date ends with this day
         matching = [d for d in available_dates if d.endswith(f"-{day_str}")]
         if matching:
             return sorted(matching, reverse=True)[0]
         return f"{current_year}-{current_month}-{day_str}"
 
-    # Check if user entered MM-DD, e.g. "09-15"
     if re.match(r"^\d{2}-\d{2}$", clean_inp):
         return f"{current_year}-{clean_inp}"
 
-    # Standard YYYY-MM-DD
     if re.match(r"^\d{4}-\d{2}-\d{2}$", clean_inp):
         return clean_inp
 
@@ -348,7 +341,8 @@ def analyze_24h_cycle(target_date_input: str = "auto"):
 
     midnight_resets = []
     
-    # 2. Parse Docker log lines for telemetry & dynamic tips
+    # 2. Extract Settled Tips & Telemetry directly from Docker log lines
+    settled_from_logs = {}
     for line in docker_lines:
         line_low = line.lower()
         
@@ -361,6 +355,7 @@ def analyze_24h_cycle(target_date_input: str = "auto"):
                     has_target_date = True
 
         if has_target_date:
+            # Parse limits, rejections, duplicates
             for k, cfg in CHANNEL_CONFIG.items():
                 if k in line_low or any(kw in line_low for kw in cfg["keywords"]) or any(cid in line for cid in cfg.get("channel_ids", [])):
                     if "daily limit reached" in line_low or "cap reached" in line_low or "skipping tip due to cap" in line_low:
@@ -375,8 +370,29 @@ def analyze_24h_cycle(target_date_input: str = "auto"):
                         stats[k]["min_odds_rejected"] += 1
                     if "duplicate tip" in line_low or "already published" in line_low or "duplicate skipped" in line_low:
                         stats[k]["duplicates_prevented"] += 1
-                    if "updated telegram tip" in line_low or "settled tip" in line_low:
-                        stats[k]["result_edits"] += 1
+
+            # Parse Settled outcome lines: "SETTLED TIP: Match 123456 -> Result: ✅Won" or "Updated Telegram tip..."
+            if "settled tip:" in line_low or "updated telegram tip" in line_low:
+                m_match = re.search(r"match\s+([0-9a-zA-Z_-]+)", line, re.IGNORECASE)
+                m_id = m_match.group(1) if m_match else "LOG_MATCH"
+                
+                c_key = match_channel_key(line)
+                stats[c_key]["result_edits"] += 1
+                
+                res_type = "PENDING"
+                if "won" in line_low or "✅" in line or "win" in line_low:
+                    res_type = "HALF_WIN" if "half" in line_low else "WIN"
+                elif "lost" in line_low or "❌" in line or "loss" in line_low:
+                    res_type = "HALF_LOSS" if "half" in line_low else "LOSS"
+                elif "void" in line_low or "push" in line_low:
+                    res_type = "VOID"
+                
+                if res_type != "PENDING":
+                    settled_from_logs[m_id] = {
+                        "channel": c_key,
+                        "result": res_type,
+                        "line": line
+                    }
 
             if "midnight brt reset" in line_low or "daily counters reset" in line_low or "resetting daily publication counters" in line_low:
                 midnight_resets.append(line.strip())
@@ -386,7 +402,13 @@ def analyze_24h_cycle(target_date_input: str = "auto"):
                     stats[k]["scheduled_reports"] += 1
                     stats[k]["total_telegram_messages"] += 1
 
-    # 3. Parse JSON audit & cache items
+    # 3. Merge log-settled data into audit items
+    for item in audit_items:
+        m_id = str(item.get("match_id") or item.get("id") or "")
+        if m_id in settled_from_logs:
+            item["result"] = settled_from_logs[m_id]["result"]
+
+    # 4. Parse JSON audit & cache items
     seen_tips = {k: set() for k in CHANNEL_CONFIG}
     
     for item in audit_items:
@@ -396,8 +418,9 @@ def analyze_24h_cycle(target_date_input: str = "auto"):
         brt_time_str = dt_brt.strftime("%Y-%m-%d %H:%M:%S BRT")
         
         fix = str(item.get("fixture") or item.get("match") or item.get("home_team", "") + " vs " + item.get("away_team", "") or "Live Match")
-        m_name = str(item.get("market_name") or item.get("market") or item.get("header_title") or item.get("title") or "")
+        m_name = str(item.get("market_name") or item.get("market") or item.get("header_title") or item.get("title") or item.get("type") or "")
         channel_ref = str(item.get("channel") or item.get("channel_id") or "")
+        msg_text = str(item.get("msg_text") or "")
         
         if "Performance Report" in fix or "Performance Report" in m_name or "summary" in m_name.lower():
             if brt_date == target_date_str:
@@ -406,13 +429,24 @@ def analyze_24h_cycle(target_date_input: str = "auto"):
                     stats[k]["total_telegram_messages"] += 1
             continue
             
-        c_key = match_channel_key(f"{m_name} {channel_ref}")
+        c_key = match_channel_key(f"{m_name} {channel_ref} {msg_text}")
         s = stats[c_key]
         
         match_id = str(item.get("match_id") or item.get("id") or item.get("event_id") or "N/A")
         msg_id = str(item.get("msg_id") or item.get("message_id") or item.get("telegram_message_id") or "N/A")
-        pick = str(item.get("pick") or item.get("selection") or "Selection")
-        res = str(item.get("result") or item.get("status") or item.get("settled_status") or "PENDING").strip().upper()
+        pick = str(item.get("pick") or item.get("selection") or item.get("side") or "Selection")
+        
+        # Check result from all fields and msg_text
+        res = str(item.get("result") or item.get("status") or item.get("settled_status") or "").strip().upper()
+        if not res or res in ["PUBLISHED", "PENDING", "ACTIVE"]:
+            if "✅" in msg_text or "won" in msg_text.lower():
+                res = "WIN"
+            elif "❌" in msg_text or "lost" in msg_text.lower():
+                res = "LOSS"
+            elif "void" in msg_text.lower():
+                res = "VOID"
+            else:
+                res = "PENDING"
         
         try:
             odds_val = float(item.get("odds", 1.90))
@@ -500,6 +534,19 @@ def analyze_24h_cycle(target_date_input: str = "auto"):
                 s["mtd_losses"] += 0.5 if "HALF" in res else 1.0
             elif any(w in res for w in ["VOID", "PUSH"]):
                 s["mtd_voids"] += 1.0
+
+    # Fallback for log-settled entries if audit JSON was empty
+    for m_id, s_info in settled_from_logs.items():
+        c_k = s_info["channel"]
+        if stats[c_k]["wins"] == 0 and stats[c_k]["losses"] == 0:
+            if s_info["result"] == "WIN":
+                stats[c_k]["wins"] += 1
+                stats[c_k]["daily_net_units"] += 0.90
+                stats[c_k]["daily_staked_units"] += 1.0
+            elif s_info["result"] == "LOSS":
+                stats[c_k]["losses"] += 1
+                stats[c_k]["daily_net_units"] -= 1.00
+                stats[c_k]["daily_staked_units"] += 1.0
 
     if report_cache.get("last_partial_date") == target_date_str:
         for k in stats:
