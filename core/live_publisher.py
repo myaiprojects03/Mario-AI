@@ -298,27 +298,62 @@ def get_today_published_tip_count(channel_key: str) -> int:
     """Calculates total tips published for a specific channel on today's BRT date."""
     now_brt = datetime.now(BRT_TZ)
     today_str = now_brt.strftime("%Y-%m-%d")
-
-    channel_keywords = {
-        "fifa_goals_ou": ["fifa goals", "goals over/under", "over/under"],
-        "fifa_asian_handicap": ["fifa asian handicap", "asian handicap", "fifa ah"],
-        "fifa_money_line": ["fifa money line", "fifa ml"],
-        "ebasket_money_line": ["ebasketball money line", "ebasket ml"],
-        "ebasket_ou": ["ebasketball over/under", "ebasket ou"]
-    }
-
-    keywords = channel_keywords.get(channel_key, [])
-    audit_data = load_all_tip_history()
+    target_channel_id = str(CHANNEL_MAP.get(channel_key, "")).strip()
 
     count = 0
-    for item in audit_data:
-        ts = str(item.get("timestamp", ""))
-        if not ts.startswith(today_str):
-            continue
+    seen_matches = set()
 
-        m_name = str(item.get("market_name", "")).lower()
-        if keywords and any(kw in m_name for kw in keywords):
-            count += 1
+    # 1. Count from published tips cache
+    cache = load_published_tips_cache()
+    if isinstance(cache, dict):
+        for key, item in cache.items():
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type", "")).lower()
+            item_ch = str(item.get("channel_id") or item.get("channel", "")).strip()
+
+            if item_type == channel_key or (target_channel_id and target_channel_id in item_ch):
+                pub_utc = str(item.get("published_at_utc", ""))
+                try:
+                    dt_brt = datetime.fromisoformat(pub_utc).astimezone(BRT_TZ)
+                    if dt_brt.strftime("%Y-%m-%d") == today_str:
+                        m_id = str(item.get("match_id") or key)
+                        if m_id not in seen_matches:
+                            seen_matches.add(m_id)
+                            count += 1
+                except Exception:
+                    pass
+
+    # 2. Count from live audit log
+    audit_file = os.path.join(os.path.dirname(__file__), "dashboard", "live_audit_log.json")
+    if os.path.exists(audit_file):
+        try:
+            with open(audit_file, "r", encoding="utf-8") as f:
+                audit_items = json.load(f)
+            for item in audit_items:
+                ts = str(item.get("timestamp", ""))
+                if not ts.startswith(today_str):
+                    continue
+                m_name = str(item.get("market_name", "")).lower()
+                m_id = str(item.get("match_id") or "")
+
+                matched = False
+                if channel_key == "fifa_asian_handicap" and ("handicap" in m_name or "ah" in m_name):
+                    matched = True
+                elif channel_key == "fifa_goals_ou" and ("gols" in m_name or "goals" in m_name or "over/under" in m_name):
+                    matched = True
+                elif channel_key == "fifa_money_line" and ("money line" in m_name or "ml" in m_name):
+                    matched = True
+                elif channel_key == "ebasket_money_line" and "ebasket" in m_name and "money" in m_name:
+                    matched = True
+                elif channel_key == "ebasket_ou" and "ebasket" in m_name and ("over" in m_name or "points" in m_name or "pontos" in m_name):
+                    matched = True
+
+                if matched and m_id not in seen_matches:
+                    seen_matches.add(m_id)
+                    count += 1
+        except Exception:
+            pass
 
     return count
 
@@ -383,11 +418,16 @@ def load_all_tip_history() -> List[Dict[str, Any]]:
             brt_time_str = "12:00"
 
         market_name = "FIFA Goals Over/Under"
-        if "fifa_ou" in t_type: market_name = "FIFA Goals Over/Under"
-        elif "fifa_ah" in t_type: market_name = "FIFA Asian Handicap"
-        elif "fifa_ml" in t_type: market_name = "FIFA Money Line"
-        elif "ebasket_ml" in t_type: market_name = "eBasketball Money Line"
-        elif "ebasket_ou" in t_type: market_name = "eBasketball Over/Under"
+        if "ebasket" in t_type and ("points" in t_type or "ou" in t_type or "over" in t_type):
+            market_name = "eBasketball Over/Under"
+        elif "ebasket" in t_type and ("money" in t_type or "ml" in t_type):
+            market_name = "eBasketball Money Line"
+        elif "asian" in t_type or "handicap" in t_type or "fifa_ah" in t_type:
+            market_name = "FIFA Asian Handicap"
+        elif "goals" in t_type or "fifa_ou" in t_type:
+            market_name = "FIFA Goals Over/Under"
+        elif "money" in t_type or "fifa_ml" in t_type:
+            market_name = "FIFA Money Line"
 
         fixture = "Live Fixture"
         pick = "Selection"
