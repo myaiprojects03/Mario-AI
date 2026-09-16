@@ -1,4 +1,4 @@
-"""
+﻿"""
 Core Live Publisher & Telegram Tip Dispatcher.
 Evaluates all 5 production models in production_models/ and dispatches live tips to Telegram channels via direct HTTP API.
 """
@@ -497,11 +497,15 @@ def generate_performance_report_text(is_midnight: bool = False, target_date_str:
     current_month_str = report_date_str[:7]
 
     channel_map = {
+        "fifa_goals_ou": ("Matrix FIFA Goals Pre O/U G01", ["fifa goals", "goals over/under", "over/under"]),
         "fifa_goals": ("Matrix FIFA Goals Pre O/U G01", ["fifa goals", "goals over/under", "over/under"]),
+        "fifa_asian_handicap": ("Matrix FIFA Pre AH G01", ["fifa asian handicap", "asian handicap", "fifa ah"]),
         "fifa_ah": ("Matrix FIFA Pre AH G01", ["fifa asian handicap", "asian handicap", "fifa ah"]),
+        "fifa_money_line": ("Matrix FIFA Pre ML G01", ["fifa money line", "fifa ml"]),
         "fifa_ml": ("Matrix FIFA Pre ML G01", ["fifa money line", "fifa ml"]),
-        "ebasket_ml": ("Matrix eBasket Pre ML G01", ["ebasketball money line", "ebasket ml"]),
-        "ebasket_ou": ("Matrix eBasket Pre O/U G01", ["ebasketball over/under", "ebasket ou"]),
+        "ebasket_money_line": ("Matrix eBasket Pre ML G01", ["ebasketball money line", "ebasket ml", "ebasketball ml"]),
+        "ebasket_ml": ("Matrix eBasket Pre ML G01", ["ebasketball money line", "ebasket ml", "ebasketball ml"]),
+        "ebasket_ou": ("Matrix eBasket Pre O/U G01", ["ebasketball over/under", "ebasket ou", "ebasketball ou"]),
         "all": ("Matrix AI Production Suite", [])
     }
 
@@ -745,9 +749,9 @@ def check_and_dispatch_scheduled_reports(bot_token: str):
     # 1. Partial Report (12:00 BRT)
     if current_hour == 12 and last_partial != today_str:
         logger.info(f"Triggering automated Partial Performance Report for {today_str} at 12:00 BRT...")
-        text = generate_performance_report_text(is_midnight=False, target_date_str=today_str, channel_key="all")
         for m_key, ch_id in CHANNEL_MAP.items():
             if ch_id:
+                text = generate_performance_report_text(is_midnight=False, target_date_str=today_str, channel_key=m_key)
                 tok = BOT_TOKENS.get(m_key, bot_token)
                 send_telegram_tip(tok, ch_id, text, m_key)
         cache["last_partial_date"] = today_str
@@ -757,9 +761,9 @@ def check_and_dispatch_scheduled_reports(bot_token: str):
     # 2. Midnight Report (00:00 BRT)
     if current_hour == 0 and last_midnight != today_str:
         logger.info(f"Triggering automated Midnight Performance Report for {today_str} at 00:00 BRT...")
-        text = generate_performance_report_text(is_midnight=True, target_date_str=today_str, channel_key="all")
         for m_key, ch_id in CHANNEL_MAP.items():
             if ch_id:
+                text = generate_performance_report_text(is_midnight=True, target_date_str=today_str, channel_key=m_key)
                 tok = BOT_TOKENS.get(m_key, bot_token)
                 send_telegram_tip(tok, ch_id, text, m_key)
         cache["last_midnight_date"] = today_str
