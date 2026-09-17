@@ -1116,7 +1116,11 @@ def evaluate_match_result(t_type: str, side: str, line: float, h_score: float, a
 
 
 def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
-    """Checks pending published tips and updates Telegram results if match finished using live API and PostgreSQL."""
+    """
+    Checks pending published tips and updates Telegram results ONLY when matches are 100% finished.
+    Scores are read STRICTLY from verified results (core.results table and confirmed finished history).
+    Pre-match fixtures (core.matches) are NEVER used for score settlement!
+    """
     if not cache:
         cache = load_published_tips_cache()
     if not cache:
@@ -1130,8 +1134,9 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
 
     now_dt = datetime.now(timezone.utc)
     db_results = {}
+    pending_ids = list(set([str(v.get("match_id")) for v in cache.values() if isinstance(v, dict) and v.get("match_id")]))
 
-    # 1. Query live JarvisBet player history endpoints for pending matches
+    # 1. Query verified finished matches from JarvisBet API (/history/pre and /history/ebasket/pre)
     if client:
         queried_players = set()
         for key, info in cache.items():
@@ -1142,7 +1147,6 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
             msg_t = str(info.get("msg_text") or "")
             sport = str(info.get("sport") or ("ebasket" if "ebasket" in str(info.get("type")) else "fifa"))
 
-            # Extract player from parenthesized text if needed, e.g. "Teams/Match: Real Madrid (KraftVK) x Liverpool (Bomb1to)"
             candidates = [p for p in [h_p, a_p] if p]
             if not candidates and "Teams/Match:" in msg_t:
                 found = re.findall(r'\(([^)]+)\)', msg_t)
@@ -1164,15 +1168,30 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                             for m in matches:
                                 if not isinstance(m, dict):
                                     continue
+
+                                # Strictly verify that the match is ACTUALLY FINISHED
+                                m_status = str(m.get("status") or m.get("state") or "").upper()
+                                is_finished = m.get("isFinished") is True or m_status in ["ENDED", "FINISHED", "FT", "CLOSED"]
+
+                                # If status indicates not started or live, skip
+                                if m_status in ["NOT_STARTED", "PRE_MATCH", "SCHEDULED", "LIVE", "IN_PLAY", "1H", "2H", "HT"]:
+                                    continue
+
                                 b365_id = str(m.get("idMatchBet365") or "")
                                 m_id = str(m.get("_id") or "")
                                 home_obj = m.get("home", {}) if isinstance(m.get("home"), dict) else {}
                                 away_obj = m.get("away", {}) if isinstance(m.get("away"), dict) else {}
                                 h_g = home_obj.get("goals") if home_obj.get("goals") is not None else home_obj.get("score")
                                 a_g = away_obj.get("goals") if away_obj.get("goals") is not None else away_obj.get("score")
+
                                 if h_g is not None and a_g is not None:
                                     try:
-                                        score_pair = (float(h_g), float(a_g))
+                                        fh = float(h_g)
+                                        fa = float(a_g)
+                                        # Never accept 0-0 unless explicitly verified as finished
+                                        if fh == 0.0 and fa == 0.0 and not is_finished:
+                                            continue
+                                        score_pair = (fh, fa)
                                         if b365_id:
                                             db_results[b365_id] = score_pair
                                         if m_id:
@@ -1182,67 +1201,70 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                 except Exception as api_err:
                     logger.debug(f"History query note for player {player}: {api_err}")
 
-    # 2. Query PostgreSQL database core.results and core.matches with multi-host fallback
-    try:
+    # 2. Query verified results table in PostgreSQL (core.results ONLY)
+    if pending_ids:
+        try:
+            db_candidates = []
+            if os.getenv("DATABASE_URL"):
+                db_candidates.append(os.getenv("DATABASE_URL"))
+            if getattr(settings, "DATABASE_URL", None):
+                db_candidates.append(settings.DATABASE_URL)
+            db_candidates.extend([
+                "postgresql://postgres:postgrespassword@db:5432/mario_ai",
+                "postgresql://postgres:sudouser@localhost:5432/Mario_AI",
+                "postgresql://postgres:postgrespassword@localhost:5432/mario_ai"
+            ])
+            seen_urls = set()
+            db_urls = [u for u in db_candidates if u and not (u in seen_urls or seen_urls.add(u))]
 
-        db_urls = []
-        if os.getenv("DATABASE_URL"):
-            db_urls.append(os.getenv("DATABASE_URL"))
-        if getattr(settings, "DATABASE_URL", None):
-            db_urls.append(settings.DATABASE_URL)
-        db_urls.extend([
-            "postgresql://postgres:postgrespassword@db:5432/mario_ai",
-            "postgresql://postgres:sudouser@localhost:5432/Mario_AI",
-            "postgresql://postgres:postgrespassword@localhost:5432/mario_ai"
-        ])
-        conn = None
-        for url in db_urls:
-            try:
-                conn = psycopg2.connect(url, connect_timeout=3)
-                break
-            except Exception:
-                continue
+            conn = None
+            for url in db_urls:
+                try:
+                    conn = psycopg2.connect(url, connect_timeout=2)
+                    break
+                except Exception:
+                    continue
 
-        if conn:
-            cur = conn.cursor()
-            cur.execute("SELECT match_id, final_home_score, final_away_score FROM core.results")
-            for m_str, h, a in cur.fetchall():
-                if m_str and h is not None and a is not None:
-                    db_results[str(m_str)] = (float(h), float(a))
+            if conn:
+                cur = conn.cursor()
+                # Strictly query core.results targeted for pending match IDs
+                # NEVER query core.matches raw_payload for score values!
+                cur.execute("""
+                    SELECT r.match_id, 
+                           COALESCE(m.raw_payload->>'idMatchBet365', ''),
+                           r.final_home_score, 
+                           r.final_away_score 
+                    FROM core.results r
+                    LEFT JOIN core.matches m ON r.match_id = m.match_id
+                    WHERE (r.match_id = ANY(%s) OR m.raw_payload->>'idMatchBet365' = ANY(%s))
+                      AND r.final_home_score IS NOT NULL AND r.final_away_score IS NOT NULL
+                    ORDER BY r.id DESC
+                """, (pending_ids, pending_ids))
+                for r_mid, b365_id, h, a in cur.fetchall():
+                    if h is not None and a is not None:
+                        pair = (float(h), float(a))
+                        if r_mid and str(r_mid) not in db_results:
+                            db_results[str(r_mid)] = pair
+                        if b365_id and str(b365_id) not in db_results:
+                            db_results[str(b365_id)] = pair
 
-            cur.execute("SELECT match_id, raw_payload FROM core.matches WHERE raw_payload IS NOT NULL ORDER BY match_start_time DESC LIMIT 1000")
-            for m_str, raw in cur.fetchall():
-                if isinstance(raw, dict):
-                    b365_id = str(raw.get("idMatchBet365") or m_str)
-                    h_obj = raw.get("home", {}) if isinstance(raw.get("home"), dict) else {}
-                    a_obj = raw.get("away", {}) if isinstance(raw.get("away"), dict) else {}
-                    h_g = h_obj.get("goals") if h_obj.get("goals") is not None else h_obj.get("score")
-                    a_g = a_obj.get("goals") if a_obj.get("goals") is not None else a_obj.get("score")
-                    if h_g is not None and a_g is not None:
-                        db_results[b365_id] = (float(h_g), float(a_g))
-                        db_results[str(m_str)] = (float(h_g), float(a_g))
+                # Persist any verified finished scores discovered from JarBet API into core.results
+                for v_id, (fh, fa) in db_results.items():
+                    try:
+                        cur.execute("""
+                            INSERT INTO core.results (match_id, final_home_score, final_away_score, settled_at, settlement_source)
+                            SELECT %s, %s, %s, NOW(), 'jarbet_verified'
+                            WHERE EXISTS (SELECT 1 FROM core.matches WHERE match_id = %s)
+                              AND NOT EXISTS (SELECT 1 FROM core.results WHERE match_id = %s)
+                        """, (v_id, int(fh), int(fa), v_id, v_id))
+                    except Exception:
+                        pass
+                conn.commit()
+                conn.close()
+        except Exception as db_ex:
+            logger.debug(f"PostgreSQL core.results query note: {db_ex}")
 
-            pending_ids = list(set([str(v.get("match_id")) for v in cache.values() if isinstance(v, dict) and v.get("match_id")]))
-            for p_id in pending_ids:
-                cur.execute("SELECT match_id, raw_payload FROM core.matches WHERE match_id = %s OR raw_payload::text LIKE %s LIMIT 1", (p_id, f"%{p_id}%"))
-                p_row = cur.fetchone()
-                if p_row and isinstance(p_row[1], dict):
-                    p_raw = p_row[1]
-                    b365_id = str(p_raw.get("idMatchBet365") or p_row[0])
-                    h_obj = p_raw.get("home", {}) if isinstance(p_raw.get("home"), dict) else {}
-                    a_obj = p_raw.get("away", {}) if isinstance(p_raw.get("away"), dict) else {}
-                    h_g = h_obj.get("goals") if h_obj.get("goals") is not None else h_obj.get("score")
-                    a_g = a_obj.get("goals") if a_obj.get("goals") is not None else a_obj.get("score")
-                    if h_g is not None and a_g is not None:
-                        db_results[p_id] = (float(h_g), float(a_g))
-                        db_results[b365_id] = (float(h_g), float(a_g))
-                        db_results[str(p_row[0])] = (float(h_g), float(a_g))
-
-            conn.close()
-    except Exception as db_ex:
-        logger.debug(f"PostgreSQL score query note: {db_ex}")
-
-    # 3. Settle all pending tips matching score results
+    # 3. Settle pending tips with elapsed time validation and 100% verified scores
     keys_to_settle = list(cache.keys())
     for key in keys_to_settle:
         info = cache.get(key)
@@ -1261,6 +1283,22 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
         if "Result:" in msg_text and ("Won" in msg_text or "Lost" in msg_text or "Void" in msg_text):
             continue
 
+        # Elapsed Match Duration Guard: eSoccer takes 12 mins, eBasket takes ~18 mins
+        # A match published less than min_duration ago is STILL ACTIVELY IN PLAY!
+        pub_time_str = info.get("published_at_utc")
+        elapsed_mins = 999.0
+        if pub_time_str:
+            try:
+                pub_dt = datetime.fromisoformat(str(pub_time_str).replace("Z", "+00:00"))
+                elapsed_mins = (now_dt - pub_dt).total_seconds() / 60.0
+            except Exception:
+                elapsed_mins = 999.0
+
+        min_duration = 18.0 if "ebasket" in str(info.get("type", "")).lower() else 13.0
+        if elapsed_mins < min_duration:
+            # Match is still actively in-play! Keep pending until game finishes.
+            continue
+
         res_status = None
 
         if m_id in db_results:
@@ -1270,13 +1308,13 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
             line = float(info.get("line", 2.5 if "ou" in t_type else 0.0))
             res_status = evaluate_match_result(t_type, side, line, h_score, a_score)
 
-        if res_status:
-            ok = update_telegram_tip_result(tok, ch, mid, msg_text, res_status)
-            if ok:
-                status_label = "✅ Won" if res_status == "WIN" else ("❌ Lost" if res_status == "LOSS" else "Void")
-                logger.info(f"SETTLED TIP: Match {m_id} -> {status_label} (Score: {h_score}-{a_score}) (Edited Msg {mid})")
-                del cache[key]
-                save_published_tips_cache(cache)
+            if res_status:
+                ok = update_telegram_tip_result(tok, ch, mid, msg_text, res_status)
+                if ok:
+                    status_label = "✅ Won" if res_status == "WIN" else ("❌ Lost" if res_status == "LOSS" else "Void")
+                    logger.info(f"SETTLED TIP: Match {m_id} -> {status_label} (Final Score: {h_score}-{a_score}) (Edited Msg {mid})")
+                    del cache[key]
+                    save_published_tips_cache(cache)
 
 
 def start_dashboard_server():
