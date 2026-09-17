@@ -26,6 +26,8 @@ services:
     environment:
       - DATABASE_URL=postgresql://postgres:postgrespassword@db:5432/mario_ai
       - MODEL_DIR=production_models
+    volumes:
+      - ./core/dashboard:/app/core/dashboard
 
 volumes:
   postgres_data:

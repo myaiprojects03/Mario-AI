@@ -123,6 +123,30 @@ def load_data_from_all_sources():
     report_cache = {}
     docker_log_lines = []
     
+# 0. Pull daily_tip_ledger.json from running Docker container or host
+    try:
+        cmd = "docker exec mario_ai_live_publisher cat /app/core/dashboard/daily_tip_ledger.json 2>/dev/null"
+        res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+        if res.returncode == 0 and res.stdout.strip():
+            ledger_dict = json.loads(res.stdout)
+            for d_str, ch_map in ledger_dict.items():
+                for c_k, m_ids in ch_map.items():
+                    for mid in m_ids:
+                        audit_items.append({
+                            "match_id": str(mid),
+                            "type": c_k,
+                            "market_name": CHANNEL_CONFIG.get(c_k, {}).get("name", c_k),
+                            "channel_id": CHANNEL_CONFIG.get(c_k, {}).get("channel_ids", [""])[0],
+                            "msg_id": "LEDGER",
+                            "timestamp": f"{d_str} 12:00:00 BRT",
+                            "fixture": "Live Match",
+                            "pick": "Selection",
+                            "odds": 1.85,
+                            "result": "PENDING"
+                        })
+    except Exception:
+        pass
+
     # 1. Pull published_tips_cache.json from running Docker container
     try:
         cmd = "docker exec mario_ai_live_publisher cat /app/core/dashboard/published_tips_cache.json 2>/dev/null"

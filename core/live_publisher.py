@@ -1,4 +1,4 @@
-﻿"""
+"""
 Core Live Publisher & Telegram Tip Dispatcher.
 Evaluates all 5 production models in production_models/ and dispatches live tips to Telegram channels via direct HTTP API.
 """
@@ -294,16 +294,80 @@ def escape_md(text: str) -> str:
 
 
 
+DAILY_LEDGER_FILE = os.path.join(os.path.dirname(__file__), "dashboard", "daily_tip_ledger.json")
+
+
+def load_daily_tip_ledger() -> Dict[str, Any]:
+    if os.path.exists(DAILY_LEDGER_FILE):
+        try:
+            with open(DAILY_LEDGER_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Error loading daily_tip_ledger.json: {e}")
+    return {}
+
+
+def record_daily_published_tip(channel_key: str, match_id: str, dt_brt: Optional[datetime] = None):
+    """Permanently records a published tip match_id in the daily ledger so it never gets deleted on settlement."""
+    if not dt_brt:
+        dt_brt = datetime.now(BRT_TZ)
+    today_str = dt_brt.strftime("%Y-%m-%d")
+
+    ledger = load_daily_tip_ledger()
+    if today_str not in ledger:
+        ledger[today_str] = {}
+    if channel_key not in ledger[today_str]:
+        ledger[today_str][channel_key] = []
+
+    m_id_str = str(match_id)
+    if m_id_str not in ledger[today_str][channel_key]:
+        ledger[today_str][channel_key].append(m_id_str)
+        try:
+            os.makedirs(os.path.dirname(DAILY_LEDGER_FILE), exist_ok=True)
+            with open(DAILY_LEDGER_FILE, "w", encoding="utf-8") as f:
+                json.dump(ledger, f, indent=2)
+            logger.info(f"Recorded tip {match_id} to daily ledger for {channel_key} (Total today: {len(ledger[today_str][channel_key])}).")
+        except Exception as e:
+            logger.warning(f"Error saving daily_tip_ledger.json: {e}")
+
+
+def parse_tip_timestamp_brt(raw_ts: Any) -> datetime:
+    now_brt = datetime.now(BRT_TZ)
+    if not raw_ts:
+        return now_brt
+    try:
+        ts_str = str(raw_ts).strip()
+        if ts_str.endswith("Z"):
+            ts_str = ts_str.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(ts_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(BRT_TZ)
+    except Exception:
+        return now_brt
+
+
 def get_today_published_tip_count(channel_key: str) -> int:
-    """Calculates total tips published for a specific channel on today's BRT date."""
+    """
+    Calculates total tips published for a specific channel on today's BRT date.
+    Pulls from:
+    1. Permanent daily tip ledger (daily_tip_ledger.json) - NEVER drained on settlement!
+    2. Active cache (published_tips_cache.json)
+    3. Historical audit log (live_audit_log.json)
+    """
     now_brt = datetime.now(BRT_TZ)
     today_str = now_brt.strftime("%Y-%m-%d")
     target_channel_id = str(CHANNEL_MAP.get(channel_key, "")).strip()
 
-    count = 0
     seen_matches = set()
 
-    # 1. Count from published tips cache
+    # 1. Primary Source: Permanent daily tip ledger
+    ledger = load_daily_tip_ledger()
+    today_ledger = ledger.get(today_str, {})
+    for m_id in today_ledger.get(channel_key, []):
+        seen_matches.add(str(m_id))
+
+    # 2. Secondary Source: Published tips cache
     cache = load_published_tips_cache()
     if isinstance(cache, dict):
         for key, item in cache.items():
@@ -313,18 +377,13 @@ def get_today_published_tip_count(channel_key: str) -> int:
             item_ch = str(item.get("channel_id") or item.get("channel", "")).strip()
 
             if item_type == channel_key or (target_channel_id and target_channel_id in item_ch):
-                pub_utc = str(item.get("published_at_utc", ""))
-                try:
-                    dt_brt = datetime.fromisoformat(pub_utc).astimezone(BRT_TZ)
-                    if dt_brt.strftime("%Y-%m-%d") == today_str:
-                        m_id = str(item.get("match_id") or key)
-                        if m_id not in seen_matches:
-                            seen_matches.add(m_id)
-                            count += 1
-                except Exception:
-                    pass
+                raw_ts = item.get("published_at_utc") or item.get("timestamp") or item.get("created_at")
+                dt_brt = parse_tip_timestamp_brt(raw_ts)
+                if dt_brt.strftime("%Y-%m-%d") == today_str:
+                    m_id = str(item.get("match_id") or key)
+                    seen_matches.add(m_id)
 
-    # 2. Count from live audit log
+    # 3. Tertiary Source: Live audit log
     audit_file = os.path.join(os.path.dirname(__file__), "dashboard", "live_audit_log.json")
     if os.path.exists(audit_file):
         try:
@@ -349,13 +408,12 @@ def get_today_published_tip_count(channel_key: str) -> int:
                 elif channel_key == "ebasket_ou" and "ebasket" in m_name and ("over" in m_name or "points" in m_name or "pontos" in m_name):
                     matched = True
 
-                if matched and m_id not in seen_matches:
+                if matched and m_id:
                     seen_matches.add(m_id)
-                    count += 1
         except Exception:
             pass
 
-    return count
+    return len(seen_matches)
 
 
 def is_daily_limit_reached(channel_key: str) -> bool:
@@ -984,6 +1042,7 @@ def run_live_publisher_cycle(bot_token: Optional[str] = None):
 
             msg_id = send_telegram_tip(target_bot_token, channel_id, msg_text, m_key)
             if msg_id:
+                record_daily_published_tip(m_key, match_id, datetime.now(BRT_TZ))
                 save_key = cache_key or match_id
                 cache[save_key] = {
                     "match_id": match_id,
