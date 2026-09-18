@@ -19,6 +19,7 @@ htmlcov/
 # Model Files & Serialized Artifacts
 *.pkl
 *.joblib
+!production_models/*.joblib
 
 # Environments
 .venv/

@@ -761,6 +761,173 @@ DAILY_LEDGER_FILE = os.path.join(os.path.dirname(__file__), "dashboard", "daily_
 SETTLED_TIPS_LEDGER_FILE = os.path.join(os.path.dirname(__file__), "dashboard", "settled_tips_ledger.json")
 
 
+def get_db_connection():
+    """Returns a direct psycopg2 connection using fallback candidate URLs."""
+    db_candidates = []
+    if os.getenv("DATABASE_URL"):
+        db_candidates.append(os.getenv("DATABASE_URL"))
+    if getattr(settings, "DATABASE_URL", None):
+        db_candidates.append(settings.DATABASE_URL)
+    db_candidates.extend([
+        "postgresql://postgres:postgrespassword@db:5432/mario_ai",
+        "postgresql://postgres:postgrespassword@localhost:5432/mario_ai",
+        "postgresql://postgres:sudouser@localhost:5432/Mario_AI"
+    ])
+    seen = set()
+    for u in db_candidates:
+        if u and u not in seen:
+            seen.add(u)
+            try:
+                conn = psycopg2.connect(u, connect_timeout=3)
+                return conn
+            except Exception:
+                continue
+    return None
+
+
+def ensure_persistence_tables():
+    """Ensures core.settled_tips and core.daily_tip_ledger tables exist in PostgreSQL."""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE SCHEMA IF NOT EXISTS core;
+                CREATE TABLE IF NOT EXISTS core.settled_tips (
+                    match_id VARCHAR(64),
+                    channel_key VARCHAR(32),
+                    home_team VARCHAR(128),
+                    away_team VARCHAR(128),
+                    market_type VARCHAR(64),
+                    pick_str VARCHAR(128),
+                    odds NUMERIC(6, 3),
+                    line NUMERIC(6, 2),
+                    side VARCHAR(16),
+                    score_str VARCHAR(32),
+                    outcome VARCHAR(16),
+                    net_units NUMERIC(8, 4),
+                    date_brt VARCHAR(10),
+                    settled_at_brt TIMESTAMP WITH TIME ZONE,
+                    PRIMARY KEY (match_id, channel_key)
+                );
+                CREATE TABLE IF NOT EXISTS core.daily_tip_ledger (
+                    date_brt VARCHAR(10),
+                    channel_key VARCHAR(32),
+                    match_id VARCHAR(64),
+                    published_at_brt TIMESTAMP WITH TIME ZONE,
+                    PRIMARY KEY (date_brt, channel_key, match_id)
+                );
+            """)
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.warning(f"Error ensuring persistence tables: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def rehydrate_ledgers_from_db():
+    """
+    On startup or rebuild, checks PostgreSQL core.settled_tips and core.daily_tip_ledger
+    to repopulate the local JSON files and memory with the full Month-to-Date (MTD) history.
+    """
+    ensure_persistence_tables()
+    conn = get_db_connection()
+    if not conn:
+        return
+
+    try:
+        now_brt = datetime.now(BRT_TZ)
+        current_month_str = now_brt.strftime("%Y-%m")
+
+        with conn.cursor() as cur:
+            # 1. Rehydrate settled tips for current month
+            cur.execute("""
+                SELECT match_id, channel_key, home_team, away_team, market_type, pick_str,
+                       odds, line, side, score_str, outcome, net_units, date_brt, settled_at_brt
+                FROM core.settled_tips
+                WHERE date_brt LIKE %s
+                ORDER BY settled_at_brt ASC
+            """, (f"{current_month_str}%",))
+            db_settled_rows = cur.fetchall()
+
+            if db_settled_rows:
+                local_settled = load_settled_tips_ledger()
+                existing_keys = {f"{it.get('match_id')}_{it.get('channel_key')}" for it in local_settled}
+                added_count = 0
+                for row in db_settled_rows:
+                    key = f"{row[0]}_{row[1]}"
+                    if key not in existing_keys:
+                        local_settled.append({
+                            "match_id": str(row[0]),
+                            "channel_key": str(row[1]),
+                            "home_team": str(row[2] or ""),
+                            "away_team": str(row[3] or ""),
+                            "market_type": str(row[4] or ""),
+                            "pick_str": str(row[5] or ""),
+                            "odds": float(row[6] or 1.90),
+                            "line": float(row[7] or 0.0),
+                            "side": str(row[8] or ""),
+                            "score": str(row[9] or ""),
+                            "score_str": str(row[9] or ""),
+                            "outcome": str(row[10] or ""),
+                            "net_units": float(row[11] or 0.0),
+                            "date_brt": str(row[12] or ""),
+                            "settled_at_brt": str(row[13]) if row[13] else ""
+                        })
+                        existing_keys.add(key)
+                        added_count += 1
+
+                if added_count > 0 or not os.path.exists(SETTLED_TIPS_LEDGER_FILE):
+                    os.makedirs(os.path.dirname(SETTLED_TIPS_LEDGER_FILE), exist_ok=True)
+                    with open(SETTLED_TIPS_LEDGER_FILE, "w", encoding="utf-8") as f:
+                        json.dump(local_settled, f, indent=2)
+                    logger.info(f"Rehydrated {added_count} settled tips from PostgreSQL into local ledger.")
+
+            # 2. Rehydrate daily published tips for current month
+            cur.execute("""
+                SELECT date_brt, channel_key, match_id
+                FROM core.daily_tip_ledger
+                WHERE date_brt LIKE %s
+            """, (f"{current_month_str}%",))
+            db_daily_rows = cur.fetchall()
+
+            if db_daily_rows:
+                local_daily = load_daily_tip_ledger()
+                updated_daily = False
+                for d_str, ch, mid in db_daily_rows:
+                    if d_str not in local_daily:
+                        local_daily[d_str] = {}
+                    if ch not in local_daily[d_str]:
+                        local_daily[d_str][ch] = []
+                    if mid not in local_daily[d_str][ch]:
+                        local_daily[d_str][ch].append(mid)
+                        updated_daily = True
+
+                if updated_daily or not os.path.exists(DAILY_LEDGER_FILE):
+                    os.makedirs(os.path.dirname(DAILY_LEDGER_FILE), exist_ok=True)
+                    with open(DAILY_LEDGER_FILE, "w", encoding="utf-8") as f:
+                        json.dump(local_daily, f, indent=2)
+                    logger.info("Rehydrated daily published tip counts from PostgreSQL.")
+
+    except Exception as e:
+        logger.warning(f"Error during ledger rehydration from DB: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def load_settled_tips_ledger() -> List[Dict[str, Any]]:
     """Loads all settled tip records from the persistent volume ledger."""
     if os.path.exists(SETTLED_TIPS_LEDGER_FILE):
@@ -773,7 +940,7 @@ def load_settled_tips_ledger() -> List[Dict[str, Any]]:
 
 
 def record_settled_tip(record: Dict[str, Any]):
-    """Permanently records a settled tip with score, outcome, and net units."""
+    """Permanently records a settled tip with score, outcome, and net units into both JSON ledger and PostgreSQL."""
     try:
         ledger = load_settled_tips_ledger()
         m_id = str(record.get("match_id", ""))
@@ -788,6 +955,43 @@ def record_settled_tip(record: Dict[str, Any]):
             logger.info(f"Recorded settled tip to ledger: {key} -> {record.get('outcome')} ({record.get('net_units')} U)")
     except Exception as e:
         logger.warning(f"Error saving settled_tips_ledger.json: {e}")
+
+    # Dual-write to PostgreSQL ground truth
+    try:
+        conn = get_db_connection()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO core.settled_tips (
+                        match_id, channel_key, home_team, away_team, market_type, pick_str,
+                        odds, line, side, score_str, outcome, net_units, date_brt, settled_at_brt
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()
+                    )
+                    ON CONFLICT (match_id, channel_key) DO UPDATE SET
+                        outcome = EXCLUDED.outcome,
+                        net_units = EXCLUDED.net_units,
+                        score_str = EXCLUDED.score_str,
+                        settled_at_brt = NOW();
+                """, (
+                    str(record.get("match_id", "")),
+                    str(record.get("channel_key", "")),
+                    str(record.get("home_team", "")),
+                    str(record.get("away_team", "")),
+                    str(record.get("market_type", "")),
+                    str(record.get("pick_str", "")),
+                    float(record.get("odds", 1.90)),
+                    float(record.get("line", 0.0)) if record.get("line") is not None else 0.0,
+                    str(record.get("side", "")),
+                    str(record.get("score", record.get("score_str", ""))),
+                    str(record.get("outcome", "")),
+                    float(record.get("net_units", 0.0)),
+                    str(record.get("date_brt", datetime.now(BRT_TZ).strftime("%Y-%m-%d")))
+                ))
+                conn.commit()
+            conn.close()
+    except Exception as db_err:
+        logger.debug(f"DB dual-write settled tip note: {db_err}")
 
 
 def update_live_audit_result(match_id: str, res_status: str):
@@ -811,7 +1015,6 @@ def update_live_audit_result(match_id: str, res_status: str):
         logger.warning(f"Error updating live_audit_log.json: {e}")
 
 
-
 def load_daily_tip_ledger() -> Dict[str, Any]:
     if os.path.exists(DAILY_LEDGER_FILE):
         try:
@@ -823,7 +1026,7 @@ def load_daily_tip_ledger() -> Dict[str, Any]:
 
 
 def record_daily_published_tip(channel_key: str, match_id: str, dt_brt: Optional[datetime] = None):
-    """Permanently records a published tip match_id in the daily ledger so it never gets deleted on settlement."""
+    """Permanently records a published tip match_id in the daily ledger and PostgreSQL so it never gets lost."""
     if not dt_brt:
         dt_brt = datetime.now(BRT_TZ)
     today_str = dt_brt.strftime("%Y-%m-%d")
@@ -844,6 +1047,21 @@ def record_daily_published_tip(channel_key: str, match_id: str, dt_brt: Optional
             logger.info(f"Recorded tip {match_id} to daily ledger for {channel_key} (Total today: {len(ledger[today_str][channel_key])}).")
         except Exception as e:
             logger.warning(f"Error saving daily_tip_ledger.json: {e}")
+
+    # Dual-write to PostgreSQL daily ledger
+    try:
+        conn = get_db_connection()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO core.daily_tip_ledger (date_brt, channel_key, match_id, published_at_brt)
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (date_brt, channel_key, match_id) DO NOTHING;
+                """, (today_str, channel_key, m_id_str))
+                conn.commit()
+            conn.close()
+    except Exception as db_err:
+        logger.debug(f"DB dual-write daily tip note: {db_err}")
 
 
 def parse_tip_timestamp_brt(raw_ts: Any) -> datetime:
@@ -1443,6 +1661,8 @@ def run_live_publisher_cycle(bot_token: Optional[str] = None):
     4. Reconciles results for finished matches via PostgreSQL database.
     5. Triggers scheduled performance reports.
     """
+    rehydrate_ledgers_from_db()
+
     logger.info("Running live publisher cycle evaluation...")
     if not bot_token:
         bot_token = os.getenv("TELEGRAM_BOT_TOKEN") or TELEGRAM_BOT_TOKEN

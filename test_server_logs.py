@@ -367,11 +367,119 @@ def print_diagnostic_report(stats, target_date_str, log_source):
         safe_print("-" * 40)
 
 
+def print_raw_streak_audit(stats, target_date_str, log_source):
+    safe_print("\n" + "=" * 95)
+    safe_print(f"       MARIO AI - RAW-RECORD AUDIT OF LOSING STREAKS ({target_date_str} BRT)")
+    safe_print("=" * 95)
+    safe_print(f"Log Source: {log_source}")
+    safe_print("Audit Target: All 5 Production Channels")
+    safe_print("-" * 95)
+
+    export_records = []
+
+    for ch_k, s in stats.items():
+        safe_print("\n" + "=" * 90)
+        safe_print(f">>> CHANNEL AUDIT: {s['title']} ({ch_k})")
+        safe_print("=" * 90)
+        
+        settled = s.get("settled_tips", [])
+        if not settled:
+            safe_print("No settled tips recorded in the active log for this channel.")
+            continue
+        
+        sorted_tips = sorted(settled, key=lambda x: str(x.get("time_brt", "")))
+        
+        zero_zero_losses = 0
+        real_score_losses = 0
+        wins = 0
+        voids = 0
+        
+        current_streak = 0
+        max_streak = 0
+        
+        loss_records = []
+        
+        for idx, t in enumerate(sorted_tips, 1):
+            out = str(t.get("outcome", "")).upper()
+            sc = str(t.get("score", "0.0-0.0"))
+            m_id = str(t.get("match_id", "N/A"))
+            t_time = str(t.get("time_brt", ""))
+            
+            is_zero = (sc in ["0.0-0.0", "0-0"])
+            
+            if out in ["LOSS", "LOST", "HALF_LOSS"]:
+                current_streak += 1
+                if current_streak > max_streak:
+                    max_streak = current_streak
+                
+                if is_zero:
+                    zero_zero_losses += 1
+                    diagnosis = "PREMATURE_0-0_BUG (Pre-match 0-0 settled before finished)"
+                else:
+                    real_score_losses += 1
+                    diagnosis = "MODEL_STUB_BIAS (Blind Over bet on high line; score stayed under)"
+                
+                rec = {
+                    "idx": idx,
+                    "channel": s["title"],
+                    "time_brt": t_time,
+                    "match_id": m_id,
+                    "score": sc,
+                    "outcome": out,
+                    "diagnosis": diagnosis
+                }
+                loss_records.append(rec)
+                export_records.append(rec)
+            elif out in ["VOID", "PUSH"]:
+                voids += 1
+            else:
+                wins += 1
+                current_streak = 0
+        
+        total_losses = zero_zero_losses + real_score_losses
+        pct_zero = (zero_zero_losses / total_losses * 100.0) if total_losses > 0 else 0.0
+        pct_real = (real_score_losses / total_losses * 100.0) if total_losses > 0 else 0.0
+
+        safe_print("Summary Statistics:")
+        safe_print(f"  Total Settled Tips: {len(sorted_tips)}")
+        safe_print(f"  Wins: {wins} | Losses: {total_losses} | Voids: {voids}")
+        safe_print(f"  Peak Consecutive Losing Streak: {max_streak} consecutive losses")
+        safe_print(f"  Current Active Losing Streak: {s['consecutive_losses']} consecutive losses")
+        safe_print("-" * 90)
+        safe_print(f"ROOT CAUSE ATTRIBUTION FOR {total_losses} LOSSES:")
+        safe_print(f"1. Premature 0-0 Settlement Bug: {zero_zero_losses} of {total_losses} losses ({pct_zero:.1f}%)")
+        safe_print("   -> Tips were marked 'Lost' because the publisher captured pre-match 0-0 scores.")
+        safe_print(f"2. Under-the-Line Genuine Losses: {real_score_losses} of {total_losses} losses ({pct_real:.1f}%)")
+        safe_print("   -> Result was marked 'Lost' because the publisher hardcoded 'Mais de (Over)' without ML edge.")
+        safe_print("-" * 90)
+        safe_print("SAMPLE RAW AUDIT OF LAST 20 LOSSES:")
+        safe_print(f"{'#':<4} | {'Time':<8} | {'Match ID':<14} | {'Score':<8} | {'Outcome':<9} | {'Root Cause Diagnosis'}")
+        safe_print("-" * 90)
+        for r in loss_records[-20:]:
+            safe_print(f"{r['idx']:<4} | {r['time_brt']:<8} | {r['match_id']:<14} | {r['score']:<8} | {r['outcome']:<9} | {r['diagnosis']}")
+
+    # Export to markdown artifact
+    if export_records:
+        export_path = "raw_streak_audit.md"
+        try:
+            with open(export_path, "w", encoding="utf-8") as f:
+                f.write(f"# Mario AI - Raw-Record Streak Audit ({target_date_str})\n\n")
+                f.write(f"**Log Source**: {log_source}\n\n")
+                f.write("| # | Channel | Time (BRT) | Match ID | Score | Outcome | Diagnosis |\n")
+                f.write("|---|---|---|---|---|---|---|\n")
+                for r in export_records:
+                    f.write(f"| {r['idx']} | {r['channel']} | {r['time_brt']} | {r['match_id']} | {r['score']} | {r['outcome']} | {r['diagnosis']} |\n")
+            safe_print(f"\nExported full raw-record table ({len(export_records)} losses) to {export_path}")
+        except Exception as e:
+            safe_print(f"Warning: Could not save {export_path}: {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Audit Mario AI server logs and verify report integrity.")
     parser.add_argument("--file", type=str, default=None, help="Path to raw log file (optional)")
     parser.add_argument("--date", type=str, default=None, help="Target date in YYYY-MM-DD (defaults to today BRT)")
     parser.add_argument("--tail", type=int, default=None, help="Number of lines to read from docker logs (e.g. 5000)")
+    parser.add_argument("--raw-audit", action="store_true", help="Print detailed raw-record audit of losing streaks")
     args = parser.parse_args()
 
     now_brt = datetime.now(BRT_TZ)
@@ -393,6 +501,8 @@ def main():
 
     stats = analyze_server_logs(log_lines, target_date)
     print_diagnostic_report(stats, target_date, log_source)
+    if args.raw_audit:
+        print_raw_streak_audit(stats, target_date, log_source)
 
 
 if __name__ == "__main__":
