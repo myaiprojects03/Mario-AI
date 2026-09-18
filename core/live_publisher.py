@@ -50,7 +50,8 @@ DAILY_TIP_LIMITS = {
     "fifa_money_line": int(os.getenv("DAILY_LIMIT_FIFA_MONEY_LINE", "150")),
     "fifa_asian_handicap": int(os.getenv("DAILY_LIMIT_FIFA_ASIAN_HANDICAP", "100")),
     "ebasket_money_line": int(os.getenv("DAILY_LIMIT_EBASKET_MONEY_LINE", "150")),
-    "ebasket_ou": int(os.getenv("DAILY_LIMIT_EBASKET_OU", "150")),
+    "ebasket_ou": int(os.getenv("DAILY_LIMIT_EBASKET_OU") or os.getenv("DAILY_LIMIT_EBASKET_POINTS", "150")),
+    "ebasket_points": int(os.getenv("DAILY_LIMIT_EBASKET_POINTS") or os.getenv("DAILY_LIMIT_EBASKET_OU", "150")),
 }
 
 BOT_TOKENS = {
@@ -58,7 +59,8 @@ BOT_TOKENS = {
     "fifa_asian_handicap": os.getenv("TELEGRAM_BOT_TOKEN_FIFA_AH") or os.getenv("TELEGRAM_BOT_TOKEN") or TELEGRAM_BOT_TOKEN,
     "fifa_money_line": os.getenv("TELEGRAM_BOT_TOKEN_FIFA_ML") or os.getenv("TELEGRAM_BOT_TOKEN") or TELEGRAM_BOT_TOKEN,
     "ebasket_money_line": os.getenv("TELEGRAM_BOT_TOKEN_EBASKET_ML") or os.getenv("TELEGRAM_BOT_TOKEN") or TELEGRAM_BOT_TOKEN,
-    "ebasket_ou": os.getenv("TELEGRAM_BOT_TOKEN_EBASKET_OU") or os.getenv("TELEGRAM_BOT_TOKEN") or TELEGRAM_BOT_TOKEN,
+    "ebasket_ou": os.getenv("TELEGRAM_BOT_TOKEN_EBASKET_OU") or os.getenv("TELEGRAM_BOT_TOKEN_EBASKET_POINTS") or os.getenv("TELEGRAM_BOT_TOKEN") or TELEGRAM_BOT_TOKEN,
+    "ebasket_points": os.getenv("TELEGRAM_BOT_TOKEN_EBASKET_POINTS") or os.getenv("TELEGRAM_BOT_TOKEN_EBASKET_OU") or os.getenv("TELEGRAM_BOT_TOKEN") or TELEGRAM_BOT_TOKEN,
 }
 
 CHANNEL_MAP = {
@@ -66,7 +68,8 @@ CHANNEL_MAP = {
     "fifa_asian_handicap": os.getenv("TELEGRAM_CHANNEL_FIFA_AH", ""),
     "fifa_money_line": os.getenv("TELEGRAM_CHANNEL_FIFA_ML", ""),
     "ebasket_money_line": os.getenv("TELEGRAM_CHANNEL_EBASKET_ML", ""),
-    "ebasket_ou": os.getenv("TELEGRAM_CHANNEL_EBASKET_OU", ""),
+    "ebasket_ou": os.getenv("TELEGRAM_CHANNEL_EBASKET_OU") or os.getenv("TELEGRAM_CHANNEL_EBASKET_POINTS", ""),
+    "ebasket_points": os.getenv("TELEGRAM_CHANNEL_EBASKET_POINTS") or os.getenv("TELEGRAM_CHANNEL_EBASKET_OU", ""),
 }
 
 PRIMARY_MINS_MIN = float(os.getenv("PRIMARY_KICKOFF_MINS_MIN", "1.0"))
@@ -404,22 +407,47 @@ def get_today_published_tip_count(channel_key: str) -> int:
     Calculates total tips published for a specific channel on today's BRT date.
     Pulls from:
     1. Permanent daily tip ledger (daily_tip_ledger.json) - NEVER drained on settlement!
-    2. Active cache (published_tips_cache.json)
-    3. Historical audit log (live_audit_log.json)
+    2. Permanent settled tips ledger (settled_tips_ledger.json)
+    3. Active cache (published_tips_cache.json)
+    4. Historical audit log (live_audit_log.json)
     """
     now_brt = datetime.now(BRT_TZ)
     today_str = now_brt.strftime("%Y-%m-%d")
     target_channel_id = str(CHANNEL_MAP.get(channel_key, "")).strip()
+
+    # Normalize channel aliases
+    equivalent_keys = {channel_key}
+    if channel_key in ["ebasket_ou", "ebasket_points"]:
+        equivalent_keys.update(["ebasket_ou", "ebasket_points"])
+    elif channel_key in ["ebasket_money_line", "ebasket_ml"]:
+        equivalent_keys.update(["ebasket_money_line", "ebasket_ml"])
+    elif channel_key in ["fifa_goals_ou", "fifa_goals"]:
+        equivalent_keys.update(["fifa_goals_ou", "fifa_goals"])
+    elif channel_key in ["fifa_asian_handicap", "fifa_ah"]:
+        equivalent_keys.update(["fifa_asian_handicap", "fifa_ah"])
+    elif channel_key in ["fifa_money_line", "fifa_ml"]:
+        equivalent_keys.update(["fifa_money_line", "fifa_ml"])
 
     seen_matches = set()
 
     # 1. Primary Source: Permanent daily tip ledger
     ledger = load_daily_tip_ledger()
     today_ledger = ledger.get(today_str, {})
-    for m_id in today_ledger.get(channel_key, []):
-        seen_matches.add(str(m_id))
+    for k in equivalent_keys:
+        for m_id in today_ledger.get(k, []):
+            seen_matches.add(str(m_id))
 
-    # 2. Secondary Source: Published tips cache
+    # 2. Secondary Source: Permanent settled tips ledger
+    settled_records = load_settled_tips_ledger()
+    for it in settled_records:
+        if str(it.get("date_brt", "")).startswith(today_str):
+            ch_k = str(it.get("channel_key", ""))
+            if ch_k in equivalent_keys:
+                m_id = str(it.get("match_id", ""))
+                if m_id:
+                    seen_matches.add(m_id)
+
+    # 3. Tertiary Source: Active published tips cache
     cache = load_published_tips_cache()
     if isinstance(cache, dict):
         for key, item in cache.items():
@@ -428,14 +456,14 @@ def get_today_published_tip_count(channel_key: str) -> int:
             item_type = str(item.get("type", "")).lower()
             item_ch = str(item.get("channel_id") or item.get("channel", "")).strip()
 
-            if item_type == channel_key or (target_channel_id and target_channel_id in item_ch):
+            if item_type in equivalent_keys or (target_channel_id and target_channel_id == item_ch):
                 raw_ts = item.get("published_at_utc") or item.get("timestamp") or item.get("created_at")
                 dt_brt = parse_tip_timestamp_brt(raw_ts)
                 if dt_brt.strftime("%Y-%m-%d") == today_str:
                     m_id = str(item.get("match_id") or key)
                     seen_matches.add(m_id)
 
-    # 3. Tertiary Source: Live audit log
+    # 4. Quaternary Source: Live audit log (covers all past tips before container restart)
     audit_file = os.path.join(os.path.dirname(__file__), "dashboard", "live_audit_log.json")
     if os.path.exists(audit_file):
         try:
@@ -446,18 +474,18 @@ def get_today_published_tip_count(channel_key: str) -> int:
                 if not ts.startswith(today_str):
                     continue
                 m_name = str(item.get("market_name", "")).lower()
-                m_id = str(item.get("match_id") or "")
+                m_id = str(item.get("match_id") or item.get("fixture", "") or "")
 
                 matched = False
-                if channel_key == "fifa_asian_handicap" and ("handicap" in m_name or "ah" in m_name):
+                if "fifa_asian_handicap" in equivalent_keys and ("handicap" in m_name or "ah" in m_name):
                     matched = True
-                elif channel_key == "fifa_goals_ou" and ("gols" in m_name or "goals" in m_name or "over/under" in m_name):
+                elif "fifa_goals_ou" in equivalent_keys and ("gols" in m_name or "goals" in m_name or "over/under" in m_name):
                     matched = True
-                elif channel_key == "fifa_money_line" and ("money line" in m_name or "ml" in m_name):
+                elif "fifa_money_line" in equivalent_keys and ("money line" in m_name or "ml" in m_name or "empate anula" in m_name):
                     matched = True
-                elif channel_key == "ebasket_money_line" and "ebasket" in m_name and "money" in m_name:
+                elif "ebasket_money_line" in equivalent_keys and ("ebasket" in m_name or "basketball" in m_name or "basquete" in m_name) and ("money" in m_name or "ml" in m_name or "resultado final" in m_name):
                     matched = True
-                elif channel_key == "ebasket_ou" and "ebasket" in m_name and ("over" in m_name or "points" in m_name or "pontos" in m_name):
+                elif ("ebasket_ou" in equivalent_keys or "ebasket_points" in equivalent_keys) and ("ebasket" in m_name or "basketball" in m_name or "basquete" in m_name) and ("over" in m_name or "points" in m_name or "pontos" in m_name or "o/u" in m_name or "ou" in m_name):
                     matched = True
 
                 if matched and m_id:
@@ -465,8 +493,27 @@ def get_today_published_tip_count(channel_key: str) -> int:
         except Exception:
             pass
 
-    return len(seen_matches)
+    # Auto-sync newly discovered historical matches to permanent daily ledger so it stays permanently locked
+    if seen_matches:
+        try:
+            ledger = load_daily_tip_ledger()
+            if today_str not in ledger:
+                ledger[today_str] = {}
+            if channel_key not in ledger[today_str]:
+                ledger[today_str][channel_key] = []
+            updated = False
+            for m_id in seen_matches:
+                if m_id not in ledger[today_str][channel_key]:
+                    ledger[today_str][channel_key].append(m_id)
+                    updated = True
+            if updated:
+                os.makedirs(os.path.dirname(DAILY_LEDGER_FILE), exist_ok=True)
+                with open(DAILY_LEDGER_FILE, "w", encoding="utf-8") as f:
+                    json.dump(ledger, f, indent=2)
+        except Exception:
+            pass
 
+    return len(seen_matches)
 
 def is_daily_limit_reached(channel_key: str) -> bool:
     """Checks if a channel has reached its configured daily tip limit."""
@@ -980,7 +1027,8 @@ def run_live_publisher_cycle(bot_token: Optional[str] = None):
         "fifa_asian_handicap": "Matrix FIFA Pre AH G01",
         "fifa_money_line": "Matrix FIFA Pre ML G01",
         "ebasket_money_line": "Matrix eBasket Pre ML G01",
-        "ebasket_ou": "Matrix eBasket Pre O/U G01"
+        "ebasket_ou": "Matrix eBasket Pre Points G01",
+        "ebasket_points": "Matrix eBasket Pre Points G01"
     }
 
     # 2. Process matches for tips
