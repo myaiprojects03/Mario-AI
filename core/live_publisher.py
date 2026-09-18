@@ -295,6 +295,58 @@ def escape_md(text: str) -> str:
 
 
 DAILY_LEDGER_FILE = os.path.join(os.path.dirname(__file__), "dashboard", "daily_tip_ledger.json")
+SETTLED_TIPS_LEDGER_FILE = os.path.join(os.path.dirname(__file__), "dashboard", "settled_tips_ledger.json")
+
+
+def load_settled_tips_ledger() -> List[Dict[str, Any]]:
+    """Loads all settled tip records from the persistent volume ledger."""
+    if os.path.exists(SETTLED_TIPS_LEDGER_FILE):
+        try:
+            with open(SETTLED_TIPS_LEDGER_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Error loading settled_tips_ledger.json: {e}")
+    return []
+
+
+def record_settled_tip(record: Dict[str, Any]):
+    """Permanently records a settled tip with score, outcome, and net units."""
+    try:
+        ledger = load_settled_tips_ledger()
+        m_id = str(record.get("match_id", ""))
+        ch_key = str(record.get("channel_key", ""))
+        key = f"{m_id}_{ch_key}"
+        existing_keys = {f"{it.get('match_id')}_{it.get('channel_key')}" for it in ledger}
+        if key not in existing_keys:
+            ledger.append(record)
+            os.makedirs(os.path.dirname(SETTLED_TIPS_LEDGER_FILE), exist_ok=True)
+            with open(SETTLED_TIPS_LEDGER_FILE, "w", encoding="utf-8") as f:
+                json.dump(ledger, f, indent=2)
+            logger.info(f"Recorded settled tip to ledger: {key} -> {record.get('outcome')} ({record.get('net_units')} U)")
+    except Exception as e:
+        logger.warning(f"Error saving settled_tips_ledger.json: {e}")
+
+
+def update_live_audit_result(match_id: str, res_status: str):
+    """Updates result field in live_audit_log.json so dashboard reflects true outcome."""
+    global LIVE_AUDIT_LOG_LIST
+    audit_file = os.path.join(os.path.dirname(__file__), "dashboard", "live_audit_log.json")
+    try:
+        if not LIVE_AUDIT_LOG_LIST and os.path.exists(audit_file):
+            with open(audit_file, "r", encoding="utf-8") as f:
+                LIVE_AUDIT_LOG_LIST = json.load(f)
+        m_id_str = str(match_id)
+        updated = False
+        for item in LIVE_AUDIT_LOG_LIST:
+            if str(item.get("match_id")) == m_id_str or m_id_str in str(item.get("match_link", "")):
+                item["result"] = res_status
+                updated = True
+        if updated:
+            with open(audit_file, "w", encoding="utf-8") as f:
+                json.dump(LIVE_AUDIT_LOG_LIST, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Error updating live_audit_log.json: {e}")
+
 
 
 def load_daily_tip_ledger() -> Dict[str, Any]:
@@ -580,12 +632,16 @@ def record_live_audit_item(market_name: str, fixture: str, pick: str, odds: str,
         logger.warning(f"Error saving live_audit_log.json: {ex}")
 
 
-def generate_performance_report_text(is_midnight: bool = False, target_date_str: Optional[str] = None, channel_key: str = "all") -> str:
-    """Generates reconciled non-zero performance reports for Partial (12:00 BRT) and Midnight (00:00 BRT)."""
+def generate_performance_report_text(is_midnight: bool = False, target_date_str: Optional[str] = None, channel_key: str = "fifa_goals_ou") -> str:
+    """
+    Generates reconciled, strictly independent performance reports per Telegram group.
+    Queries the persistent settled_tips_ledger.json and reconciles with published tips.
+    Suppresses zero-filled outputs when data is pending or missing.
+    """
     now_brt = datetime.now(BRT_TZ)
     if not target_date_str:
         if is_midnight:
-            # Midnight report covers the completed day
+            # Midnight report at 00:00 covers the completed calendar day
             report_date_str = (now_brt - timedelta(days=1)).strftime("%Y-%m-%d")
         else:
             report_date_str = now_brt.strftime("%Y-%m-%d")
@@ -593,159 +649,177 @@ def generate_performance_report_text(is_midnight: bool = False, target_date_str:
         report_date_str = target_date_str
 
     current_month_str = report_date_str[:7]
+    report_title_type = "DAILY & MONTH-TO-DATE PERFORMANCE REPORT" if is_midnight else "PARTIAL PERFORMANCE REPORT (12:00 BRT)"
+    report_date_line = f"Date: {report_date_str} (Midnight BRT)" if is_midnight else f"Date: {report_date_str}"
 
-    channel_map = {
-        "fifa_goals_ou": ("Matrix FIFA Goals Pre O/U G01", ["fifa goals", "goals over/under", "over/under"]),
-        "fifa_goals": ("Matrix FIFA Goals Pre O/U G01", ["fifa goals", "goals over/under", "over/under"]),
-        "fifa_asian_handicap": ("Matrix FIFA Pre AH G01", ["fifa asian handicap", "asian handicap", "fifa ah"]),
-        "fifa_ah": ("Matrix FIFA Pre AH G01", ["fifa asian handicap", "asian handicap", "fifa ah"]),
-        "fifa_money_line": ("Matrix FIFA Pre ML G01", ["fifa money line", "fifa ml"]),
-        "fifa_ml": ("Matrix FIFA Pre ML G01", ["fifa money line", "fifa ml"]),
-        "ebasket_money_line": ("Matrix eBasket Pre ML G01", ["ebasketball money line", "ebasket ml", "ebasketball ml"]),
-        "ebasket_ml": ("Matrix eBasket Pre ML G01", ["ebasketball money line", "ebasket ml", "ebasketball ml"]),
-        "ebasket_ou": ("Matrix eBasket Pre O/U G01", ["ebasketball over/under", "ebasket ou", "ebasketball ou"]),
-        "all": ("Matrix AI Production Suite", [])
+    channel_titles = {
+        "fifa_goals_ou": "Matrix Esoccer Pre Goals G01",
+        "fifa_asian_handicap": "Matrix FIFA Pre AH G01",
+        "fifa_money_line": "Matrix FIFA Pre ML G01",
+        "ebasket_money_line": "Matrix eBasket Pre ML G01",
+        "ebasket_ou": "Matrix eBasket Pre Points G01",
     }
+    display_title = channel_titles.get(channel_key, channel_key.upper())
 
-    display_title, filter_keywords = channel_map.get(channel_key, ("Matrix AI Production Suite", []))
+    # 1. Query published count for today from persistent daily ledger
+    daily_ledger = load_daily_tip_ledger()
+    published_matches = daily_ledger.get(report_date_str, {}).get(channel_key, [])
+    published_count = len(published_matches)
 
-    audit_data = load_all_tip_history()
+    # 2. Query active pending tips in cache
+    cache = load_published_tips_cache()
+    pending_count = sum(1 for v in cache.values() if isinstance(v, dict) and v.get("type") == channel_key)
 
-    # Filter out report logs (only real tips)
-    clean_audit_data = []
-    for item in audit_data:
-        fix = str(item.get("fixture", ""))
-        m_name = str(item.get("market_name", ""))
-        if fix == "Live Fixture" and "Selection" in str(item.get("pick", "")):
-            continue
-        if "Performance Report" in fix or "Performance Report" in m_name:
-            continue
-        clean_audit_data.append(item)
+    # 3. Query settled tips ledger
+    all_settled = load_settled_tips_ledger()
+    today_settled = [
+        it for it in all_settled 
+        if it.get("channel_key") == channel_key and it.get("date_brt") == report_date_str
+    ]
+    mtd_settled = [
+        it for it in all_settled 
+        if it.get("channel_key") == channel_key and str(it.get("date_brt", "")).startswith(current_month_str)
+    ]
 
-    # Check if target date has settled tips; if 0, auto-fallback to latest date with settled tips
-    target_settled = 0
-    available_dates = set()
-    for item in clean_audit_data:
-        ts = str(item.get("timestamp") or item.get("published_at_utc") or item.get("created_at") or "")
-        res = str(item.get("result", "")).strip().upper()
-        d_str = ts.split(" ")[0] if " " in ts else ts[:10]
-        if d_str and len(d_str) == 10:
-            available_dates.add(d_str)
-        if d_str == report_date_str and any(w in res for w in ["WIN", "WON", "LOSS", "LOST", "VOID", "PUSH"]):
-            target_settled += 1
+    # --- SAFEGUARDS & INTEGRITY RECONCILIATION ---
+    # Scenario A: Tips were published, but none settled yet and pending fixtures exist
+    if published_count > 0 and len(today_settled) == 0 and pending_count > 0:
+        return f"""{display_title}
+{report_title_type}
+{report_date_line}
 
-    if target_settled == 0 and available_dates:
-        sorted_dates = sorted(list(available_dates), reverse=True)
-        if sorted_dates:
-            report_date_str = sorted_dates[0]
-            current_month_str = report_date_str[:7]
+⏳ STATUS: DATA RECONCILIATION IN PROGRESS
+• Tips Dispatched Today: {published_count}
+• Active / In-Play Fixtures: {pending_count}
+• Settled Results on Record: 0
 
+All published matches are currently active in-play or awaiting verified post-match official scores.
+Final figures will be compiled upon completed settlement verification.
+
+Mario AI Production Suite"""
+
+    # Scenario B: Tips were published, but 0 settled and 0 pending (data sync failure)
+    if published_count > 0 and len(today_settled) == 0 and pending_count == 0:
+        return f"""{display_title}
+{report_title_type}
+{report_date_line}
+
+⚠️ STATUS: DATA INTEGRITY ALERT - SETTLEMENT UNRECONCILED
+• Tips Dispatched Today: {published_count}
+• Settled Records Found: 0
+• Pending Cache Count: 0
+
+Settlement ledger query returned zero records despite published tips on record.
+Normal performance output suppressed pending operator investigation.
+
+Mario AI Production Suite"""
+
+    # Scenario C: Truly 0 tips published and 0 settled
+    if published_count == 0 and len(today_settled) == 0:
+        # Calculate MTD figures if present
+        mtd_w = sum(1.0 if it.get("outcome") in ["WIN","WON"] else (0.5 if it.get("outcome")=="HALF_WIN" else 0.0) for it in mtd_settled)
+        mtd_l = sum(1.0 if it.get("outcome") in ["LOSS","LOST"] else (0.5 if it.get("outcome")=="HALF_LOSS" else 0.0) for it in mtd_settled)
+        mtd_v = sum(1.0 for it in mtd_settled if it.get("outcome") in ["VOID","PUSH"])
+        mtd_u = sum(float(it.get("net_units", 0.0)) for it in mtd_settled)
+        mtd_total = len(mtd_settled)
+        mtd_dec = mtd_w + mtd_l
+        mtd_wr = (mtd_w / mtd_dec * 100.0) if mtd_dec > 0 else 0.0
+        mtd_roi = (mtd_u / mtd_total * 100.0) if mtd_total > 0 else 0.0
+        sign_mtd = "+" if mtd_u >= 0 else ""
+
+        return f"""{display_title}
+{report_title_type}
+{report_date_line}
+
+ℹ️ ZERO TIPS DISPATCHED TODAY
+• No eligible betting opportunities met the edge and EV thresholds for this market today.
+• Unsettled Bets Pending: {pending_count}
+
+Cumulative Month-to-Date (MTD):
+• Total Settled MTD: {mtd_total} Tips
+• Wins: {int(mtd_w)} | Losses: {int(mtd_l)} | Voids: {int(mtd_v)}
+• MTD Win Rate: {mtd_wr:.1f}%
+• MTD ROI: {sign_mtd}{mtd_roi:.1f}%
+• MTD Net Result: {sign_mtd}{mtd_u:.2f} Units
+
+Calculations based on 1.0 Unit fixed stake per tip.
+Mario AI Production Suite"""
+
+    # --- Scenario D: Calculate Reconciled Per-Channel Performance ---
     today_wins = 0.0
     today_losses = 0.0
     today_voids = 0.0
-    today_half_wins = 0.0
-    today_half_losses = 0.0
+    today_half_wins = 0
+    today_half_losses = 0
     today_units = 0.0
-    today_staked_units = 0.0
 
+    for it in today_settled:
+        out = str(it.get("outcome", "")).upper()
+        u = float(it.get("net_units", 0.0))
+        today_units += u
+        if out in ["WIN", "WON"]:
+            today_wins += 1.0
+        elif out in ["HALF_WIN"]:
+            today_wins += 0.5
+            today_half_wins += 1
+        elif out in ["LOSS", "LOST"]:
+            today_losses += 1.0
+        elif out in ["HALF_LOSS"]:
+            today_losses += 0.5
+            today_half_losses += 1
+        elif out in ["VOID", "PUSH"]:
+            today_voids += 1.0
+
+    today_settled_count = len(today_settled)
+    today_decided = today_wins + today_losses
+    today_win_rate = (today_wins / today_decided * 100.0) if today_decided > 0 else 0.0
+    today_roi = (today_units / today_settled_count * 100.0) if today_settled_count > 0 else 0.0
+
+    # Calculate Trailing Consecutive-Loss Streak
+    # Sort chronologically by settled_at_brt
+    sorted_today = sorted(today_settled, key=lambda x: str(x.get("settled_at_brt", "")))
+    consecutive_losses = 0
+    for it in reversed(sorted_today):
+        out = str(it.get("outcome", "")).upper()
+        if out in ["LOSS", "LOST", "HALF_LOSS"]:
+            consecutive_losses += 1
+        elif out in ["VOID", "PUSH"]:
+            continue
+        else: # Win or Half-Win breaks the loss streak
+            break
+
+    # Calculate Cumulative Month-to-Date (MTD)
     mtd_wins = 0.0
     mtd_losses = 0.0
     mtd_voids = 0.0
-    mtd_half_wins = 0.0
-    mtd_half_losses = 0.0
+    mtd_half_wins = 0
+    mtd_half_losses = 0
     mtd_units = 0.0
-    mtd_staked_units = 0.0
 
-    unsettled_count = 0
-    today_outcomes = []
+    for it in mtd_settled:
+        out = str(it.get("outcome", "")).upper()
+        u = float(it.get("net_units", 0.0))
+        mtd_units += u
+        if out in ["WIN", "WON"]:
+            mtd_wins += 1.0
+        elif out in ["HALF_WIN"]:
+            mtd_wins += 0.5
+            mtd_half_wins += 1
+        elif out in ["LOSS", "LOST"]:
+            mtd_losses += 1.0
+        elif out in ["HALF_LOSS"]:
+            mtd_losses += 0.5
+            mtd_half_losses += 1
+        elif out in ["VOID", "PUSH"]:
+            mtd_voids += 1.0
 
-    for item in clean_audit_data:
-        m_name = str(item.get("market_name", "")).lower()
-        if channel_key and channel_key != "all":
-            if filter_keywords and not any(kw in m_name for kw in filter_keywords):
-                continue
+    mtd_settled_count = len(mtd_settled)
+    mtd_decided = mtd_wins + mtd_losses
+    mtd_win_rate = (mtd_wins / mtd_decided * 100.0) if mtd_decided > 0 else 0.0
+    mtd_roi = (mtd_units / mtd_settled_count * 100.0) if mtd_settled_count > 0 else 0.0
 
-        ts = str(item.get("timestamp") or item.get("published_at_utc") or item.get("created_at") or "")
-        res = str(item.get("result", "")).strip().upper()
-
-        try:
-            odds_val = float(item.get("odds", 1.90))
-        except Exception:
-            odds_val = 1.90
-        
-        stake = 1.0
-
-        is_today = ts.startswith(report_date_str)
-        is_this_month = ts.startswith(current_month_str)
-
-        if "PENDING" in res:
-            if is_today:
-                unsettled_count += 1
-            continue
-
-        net = 0.0
-        status_label = "Pending"
-
-        if any(w in res for w in ["WIN", "WON"]):
-            if "HALF" in res:
-                net = 0.5 * (odds_val - 1.0)
-                status_label = "Half Won"
-                if is_today:
-                    today_half_wins += 1
-                    today_wins += 0.5
-                if is_this_month:
-                    mtd_half_wins += 1
-                    mtd_wins += 0.5
-            else:
-                net = odds_val - 1.0
-                status_label = "✅ Won"
-                if is_today:
-                    today_wins += 1
-                if is_this_month:
-                    mtd_wins += 1
-        elif any(l in res for l in ["LOSS", "LOST"]):
-            if "HALF" in res:
-                net = -0.5
-                status_label = "Half Lost"
-                if is_today:
-                    today_half_losses += 1
-                    today_losses += 0.5
-                if is_this_month:
-                    mtd_half_losses += 1
-                    mtd_losses += 0.5
-            else:
-                net = -1.0
-                status_label = "❌ Lost"
-                if is_today:
-                    today_losses += 1
-                if is_this_month:
-                    mtd_losses += 1
-        elif "VOID" in res or "PUSH" in res:
-            net = 0.0
-            status_label = "Void"
-            if is_today:
-                today_voids += 1
-            if is_this_month:
-                mtd_voids += 1
-
-        if is_today:
-            today_units += net
-            today_staked_units += stake
-            fix_str = str(item.get("fixture", "Match"))
-            pick_str = str(item.get("pick", "Pick"))
-            today_outcomes.append(f"• {fix_str} - {pick_str} @ {odds_val:.2f} -> {status_label}")
-
-        if is_this_month:
-            mtd_units += net
-            mtd_staked_units += stake
-
-    today_settled_count = int(today_wins + today_losses + today_voids)
-    today_win_rate = (today_wins / (today_wins + today_losses) * 100.0) if (today_wins + today_losses) > 0 else 0.0
-    today_roi = (today_units / today_staked_units * 100.0) if today_staked_units > 0 else 0.0
-
-    mtd_settled_count = int(mtd_wins + mtd_losses + mtd_voids)
-    mtd_win_rate = (mtd_wins / (mtd_wins + mtd_losses) * 100.0) if (mtd_wins + mtd_losses) > 0 else 0.0
-    mtd_roi = (mtd_units / mtd_staked_units * 100.0) if mtd_staked_units > 0 else 0.0
+    sign_today = "+" if today_units >= 0 else ""
+    sign_mtd = "+" if mtd_units >= 0 else ""
 
     tw_str = f"{int(today_wins)}" if today_wins.is_integer() else f"{today_wins:.1f}"
     tl_str = f"{int(today_losses)}" if today_losses.is_integer() else f"{today_losses:.1f}"
@@ -755,57 +829,41 @@ def generate_performance_report_text(is_midnight: bool = False, target_date_str:
     ml_str = f"{int(mtd_losses)}" if mtd_losses.is_integer() else f"{mtd_losses:.1f}"
     mv_str = f"{int(mtd_voids)}" if mtd_voids.is_integer() else f"{mtd_voids:.1f}"
 
-    sign_today = "+" if today_units >= 0 else ""
-    sign_mtd = "+" if mtd_units >= 0 else ""
-
     lines = []
     lines.append(f"{display_title}")
-    if not is_midnight:
-        lines.append("PARTIAL PERFORMANCE REPORT (12:00 BRT)")
-        lines.append(f"Date: {report_date_str}")
-        lines.append("")
-        lines.append("Settled Performance Today:")
-        lines.append(f"• Settled Tips: {today_settled_count}")
-        lines.append(f"• Wins: {tw_str} | Losses: {tl_str} | Voids: {tv_str}")
-        if today_half_wins > 0 or today_half_losses > 0:
-            lines.append(f"• Half Won: {int(today_half_wins)} | Half Lost: {int(today_half_losses)}")
-        lines.append(f"• Win Rate: {today_win_rate:.1f}%")
-        lines.append(f"• Net Units Today: {sign_today}{today_units:.2f} Units")
-        lines.append("")
-        lines.append(f"Unsettled Bets Pending: {unsettled_count}")
-        lines.append("")
-        lines.append("Calculations based on 1.0 Unit fixed stake per tip.")
-        lines.append("Mario AI Production Suite")
-    else:
-        lines.append("DAILY & MONTH-TO-DATE PERFORMANCE REPORT")
-        lines.append(f"Date: {report_date_str} (Midnight BRT)")
-        lines.append("")
-        lines.append("Today's Final Settled Performance:")
-        lines.append(f"• Settled Tips: {today_settled_count}")
-        lines.append(f"• Wins: {tw_str} | Losses: {tl_str} | Voids: {tv_str}")
-        if today_half_wins > 0 or today_half_losses > 0:
-            lines.append(f"• Half Won: {int(today_half_wins)} | Half Lost: {int(today_half_losses)}")
-        lines.append(f"• Win Rate: {today_win_rate:.1f}%")
-        lines.append(f"• Day's ROI: {today_roi:+.1f}%")
-        lines.append(f"• Day's Net Result: {sign_today}{today_units:.2f} Units")
-        lines.append("")
+    lines.append(f"{report_title_type}")
+    lines.append(f"{report_date_line}")
+    lines.append("")
 
+    lines.append("Today's Settled Performance:" if not is_midnight else "Today's Final Settled Performance:")
+    lines.append(f"• Settled Tips: {today_settled_count}")
+    lines.append(f"• Wins: {tw_str} | Losses: {tl_str} | Voids: {tv_str}")
+    if today_half_wins > 0 or today_half_losses > 0:
+        lines.append(f"• Half Won: {today_half_wins} | Half Lost: {today_half_losses}")
+    lines.append(f"• Win Rate: {today_win_rate:.1f}%")
+    if is_midnight:
+        lines.append(f"• Day's ROI: {sign_today}{today_roi:.1f}%")
+    lines.append(f"• Day's Net Result: {sign_today}{today_units:.2f} Units")
+    lines.append(f"• Active Loss Streak: {consecutive_losses}")
+    if consecutive_losses >= 5:
+        lines.append(f"⚠️ Circuit Breaker Alert: {consecutive_losses} consecutive losses on record.")
+    lines.append("")
 
-
+    if is_midnight:
         lines.append("Cumulative Month-to-Date (MTD):")
         lines.append(f"• Total Settled MTD: {mtd_settled_count} Tips")
         lines.append(f"• Wins: {mw_str} | Losses: {ml_str} | Voids: {mv_str}")
         if mtd_half_wins > 0 or mtd_half_losses > 0:
-            lines.append(f"• Half Won: {int(mtd_half_wins)} | Half Lost: {int(mtd_half_losses)}")
+            lines.append(f"• Half Won: {mtd_half_wins} | Half Lost: {mtd_half_losses}")
         lines.append(f"• MTD Win Rate: {mtd_win_rate:.1f}%")
-        lines.append(f"• MTD ROI: {mtd_roi:+.1f}%")
+        lines.append(f"• MTD ROI: {sign_mtd}{mtd_roi:.1f}%")
         lines.append(f"• MTD Net Result: {sign_mtd}{mtd_units:.2f} Units")
         lines.append("")
 
-        lines.append(f"Unsettled Bets Pending: {unsettled_count}")
-        lines.append("")
-        lines.append("Calculations based on 1.0 Unit fixed stake per tip.")
-        lines.append("Mario AI Production Suite")
+    lines.append(f"Unsettled Bets Pending: {pending_count}")
+    lines.append("")
+    lines.append("Calculations based on 1.0 Unit fixed stake per tip.")
+    lines.append("Mario AI Production Suite")
 
     return "\n".join(lines)
 
@@ -1050,6 +1108,7 @@ def run_live_publisher_cycle(bot_token: Optional[str] = None):
                     "sport": "ebasket" if "ebasket" in m_key else "fifa",
                     "home_player": h_player,
                     "away_player": a_player,
+                    "fixture": f"{home_team} x {away_team}",
                     "published_at_utc": now_utc.isoformat(),
                     "msg_id": msg_id,
                     "channel_id": channel_id,
@@ -1058,7 +1117,8 @@ def run_live_publisher_cycle(bot_token: Optional[str] = None):
                     "bot_token": target_bot_token,
                     "msg_text": msg_text,
                     "side": side_val,
-                    "line": float(line_val)
+                    "line": float(line_val),
+                    "odds": float(odds_val)
                 }
                 save_published_tips_cache(cache)
                 record_live_audit_item(header_title, f"{home_team} x {away_team}", pick_str, f"{odds_val:.2f}", "60.0%", "+14.2%", "1.00 Unit", link_url, "PUBLISHED", "PENDING", match_id=match_id, msg_id=msg_id)
@@ -1313,6 +1373,47 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                 if ok:
                     status_label = "✅ Won" if res_status == "WIN" else ("❌ Lost" if res_status == "LOSS" else "Void")
                     logger.info(f"SETTLED TIP: Match {m_id} -> {status_label} (Final Score: {h_score}-{a_score}) (Edited Msg {mid})")
+
+                    # Calculate net units for 1.0 unit flat stake
+                    odds_num = float(info.get("odds", 1.90))
+                    if not odds_num or odds_num <= 1.0:
+                        try:
+                            m_odds = re.search(r'Odds:\s*([0-9.]+)', msg_text)
+                            odds_num = float(m_odds.group(1)) if m_odds else 1.90
+                        except Exception:
+                            odds_num = 1.90
+
+                    if res_status in ["WIN", "WON"]:
+                        net_u = round(odds_num - 1.0, 4)
+                    elif res_status in ["HALF_WIN"]:
+                        net_u = round(0.5 * (odds_num - 1.0), 4)
+                    elif res_status in ["VOID", "PUSH"]:
+                        net_u = 0.0
+                    elif res_status in ["HALF_LOSS"]:
+                        net_u = -0.5
+                    else: # LOSS
+                        net_u = -1.0
+
+                    now_b = datetime.now(BRT_TZ)
+                    settled_record = {
+                        "match_id": m_id,
+                        "channel_key": t_type,
+                        "msg_id": mid,
+                        "published_at_utc": pub_time_str,
+                        "settled_at_brt": now_b.strftime("%Y-%m-%d %H:%M:%S BRT"),
+                        "date_brt": now_b.strftime("%Y-%m-%d"),
+                        "fixture": info.get("fixture") or f"{info.get('home_player','')} x {info.get('away_player','')}",
+                        "market_type": t_type,
+                        "side": side,
+                        "line": line,
+                        "odds": odds_num,
+                        "final_score": f"{int(h_score)}-{int(a_score)}" if (h_score.is_integer() and a_score.is_integer()) else f"{h_score}-{a_score}",
+                        "outcome": res_status,
+                        "net_units": net_u
+                    }
+                    record_settled_tip(settled_record)
+                    update_live_audit_result(m_id, res_status)
+
                     del cache[key]
                     save_published_tips_cache(cache)
 
