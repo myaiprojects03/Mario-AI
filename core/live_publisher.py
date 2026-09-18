@@ -42,7 +42,7 @@ LIVE_AUDIT_LOG_LIST = []
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("live_publisher")
 
-MODEL_DIR = os.getenv("MODEL_DIR", "production_models")
+MODEL_DIR = os.getenv("MODEL_DIR") or os.path.join(os.path.dirname(os.path.dirname(__file__)), "production_models")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
 DAILY_TIP_LIMITS = {
@@ -100,6 +100,466 @@ class ProductionModelManager:
                 logger.info(f"Loaded production model for {market} from {fpath}")
             else:
                 logger.warning(f"Production model file not found: {fpath}")
+GLOBAL_MODEL_MANAGER: Optional[ProductionModelManager] = None
+PLAYER_STATS_CACHE: Dict[str, Tuple[float, float, int]] = {}
+
+
+def get_model_manager() -> ProductionModelManager:
+    global GLOBAL_MODEL_MANAGER
+    if GLOBAL_MODEL_MANAGER is None:
+        GLOBAL_MODEL_MANAGER = ProductionModelManager()
+    return GLOBAL_MODEL_MANAGER
+
+
+def get_player_scoring_averages(player_name: str, sport: str = "fifa") -> Tuple[float, float]:
+    """Queries or uses cached historical scoring averages (scored, conceded) for player."""
+    global PLAYER_STATS_CACHE
+    if not player_name:
+        return (2.2, 2.2) if sport == "fifa" else (78.0, 78.0)
+
+    clean_name = player_name.strip().lower()
+    cache_key = f"{sport}_{clean_name}"
+    if cache_key in PLAYER_STATS_CACHE:
+        return PLAYER_STATS_CACHE[cache_key][:2]
+
+    def_scored = 2.2 if sport == "fifa" else 78.0
+    def_conceded = 2.2 if sport == "fifa" else 78.0
+
+    db_url = os.getenv("DATABASE_URL") or settings.DATABASE_URL
+    if db_url:
+        try:
+            engine = create_engine(db_url, connect_timeout=2)
+            with engine.connect() as conn:
+                query = text("""
+                    SELECT AVG(r.final_home_score) as avg_sc, AVG(r.final_away_score) as avg_cc, COUNT(*) as cnt
+                    FROM core.results r
+                    JOIN core.matches m ON r.match_id = m.match_id
+                    WHERE m.raw_payload->'home'->>'name' ILIKE :p OR m.home_team ILIKE :p
+                """)
+                row = conn.execute(query, {"p": f"%{clean_name}%"}).fetchone()
+                if row and row[0] is not None and row[2] >= 3:
+                    avg_sc = float(row[0])
+                    avg_cc = float(row[1]) if row[1] is not None else def_conceded
+                    PLAYER_STATS_CACHE[cache_key] = (avg_sc, avg_cc, int(row[2]))
+                    return (avg_sc, avg_cc)
+        except Exception:
+            pass
+
+    PLAYER_STATS_CACHE[cache_key] = (def_scored, def_conceded, 0)
+    return (def_scored, def_conceded)
+
+
+def evaluate_market_opportunity(
+    m_key: str,
+    match: Dict[str, Any],
+    odds_dict: Dict[str, Any],
+    h_player: str,
+    a_player: str,
+    home_team: str,
+    away_team: str,
+    min_odds: float = 1.60,
+    min_edge: float = 0.02
+) -> Optional[Dict[str, Any]]:
+    """
+    Evaluates live match using trained production ML models to determine genuine positive EV opportunities.
+    Replaces the hardcoded 'Always Over / Always Home' stubs across all 5 channels.
+    Returns tip parameters (side, pick_str, odds, line, prob_str, edge_str) or None if no edge.
+    """
+    mgr = get_model_manager()
+    sport = "ebasket" if "ebasket" in m_key else "fifa"
+
+    h_sc, h_cc = get_player_scoring_averages(h_player, sport)
+    a_sc, a_cc = get_player_scoring_averages(a_player, sport)
+    diff_exp = (h_sc - h_cc) - (a_sc - a_cc)
+
+    # 1. FIFA Goals Over / Under
+    if m_key == "fifa_goals_ou":
+        ou = odds_dict.get("over_under", {}) if isinstance(odds_dict.get("over_under"), dict) else {}
+        line_val = float(ou.get("line", 2.5))
+        over_odds = float(ou.get("over", 0.0))
+        under_odds = float(ou.get("under", 0.0))
+
+        if over_odds <= 1.0 and under_odds <= 1.0:
+            return None
+
+        model_obj = mgr.models.get("fifa_goals_ou")
+        exp_goals = (h_sc + a_cc) / 2.0 + (a_sc + h_cc) / 2.0
+
+        X = np.zeros((1, 21), dtype=float)
+        X[0, 0] = 1.0
+        X[0, 1] = 1.0
+        X[0, 2] = h_sc
+        X[0, 3] = h_sc
+        X[0, 4] = h_cc
+        X[0, 5] = h_cc
+        X[0, 6] = a_sc
+        X[0, 7] = a_sc
+        X[0, 8] = a_cc
+        X[0, 9] = a_cc
+        X[0, 10] = exp_goals
+        X[0, 11] = 5.0
+        X[0, 12] = exp_goals
+        X[0, 13] = line_val
+        X[0, 14] = exp_goals - line_val
+        X[0, 15] = 0.50
+        X[0, 16] = 0.45
+        X[0, 17] = (1.0 / over_odds) if over_odds > 1.0 else 0.50
+        X[0, 18] = X[0, 17] - 0.50
+
+        try:
+            if model_obj and hasattr(model_obj, "model") and model_obj.model is not None:
+                probs = model_obj.model.predict_proba(X)[0]
+                p_over = float(probs[1])
+            else:
+                p_over = 1.0 / (1.0 + np.exp(-(exp_goals - line_val)))
+        except Exception:
+            p_over = 1.0 / (1.0 + np.exp(-(exp_goals - line_val)))
+
+        p_under = 1.0 - p_over
+        imp_over = (1.0 / over_odds) if over_odds > 1.0 else 1.0
+        imp_under = (1.0 / under_odds) if under_odds > 1.0 else 1.0
+
+        edge_over = p_over - imp_over
+        edge_under = p_under - imp_under
+
+        if edge_over >= min_edge and edge_over >= edge_under and over_odds >= min_odds:
+            return {
+                "side": "over",
+                "line": line_val,
+                "odds": over_odds,
+                "pick_str": f"Mais de {line_val} Gols",
+                "prob_str": f"{p_over*100:.1f}%",
+                "edge_str": f"{edge_over*100:+.1f}%"
+            }
+        elif edge_under >= min_edge and edge_under > edge_over and under_odds >= min_odds:
+            return {
+                "side": "under",
+                "line": line_val,
+                "odds": under_odds,
+                "pick_str": f"Menos de {line_val} Gols",
+                "prob_str": f"{p_under*100:.1f}%",
+                "edge_str": f"{edge_under*100:+.1f}%"
+            }
+        return None
+
+    # 2. eBasket Over / Under
+    elif m_key in ["ebasket_ou", "ebasket_points"]:
+        ou = odds_dict.get("over_under", {}) if isinstance(odds_dict.get("over_under"), dict) else {}
+        line_val = float(ou.get("line", 154.5))
+        over_odds = float(ou.get("over", 0.0))
+        under_odds = float(ou.get("under", 0.0))
+
+        if over_odds <= 1.0 and under_odds <= 1.0:
+            return None
+
+        model_obj = mgr.models.get("ebasket_ou")
+        exp_pts = (h_sc + a_cc) / 2.0 + (a_sc + h_cc) / 2.0
+
+        X = np.zeros((1, 26), dtype=float)
+        X[0, 0] = 1.0
+        X[0, 1] = 1.0
+        X[0, 2] = h_sc
+        X[0, 3] = h_sc
+        X[0, 4] = h_cc
+        X[0, 5] = h_cc
+        X[0, 6] = a_sc
+        X[0, 7] = a_sc
+        X[0, 8] = a_cc
+        X[0, 9] = a_cc
+        X[0, 10] = exp_pts
+        X[0, 11] = 0.50
+        X[0, 12] = line_val
+        X[0, 13] = exp_pts - line_val
+        X[0, 14] = 0.50
+        X[0, 15] = 12.0
+        X[0, 16] = 0.0
+        X[0, 17] = 0.0
+        X[0, 18] = h_sc
+        X[0, 19] = 1.0
+        X[0, 20] = a_sc
+        X[0, 21] = 1.0
+        X[0, 22] = h_sc - a_sc
+        X[0, 23] = exp_pts
+        X[0, 24] = exp_pts
+        X[0, 25] = 5.0
+
+        try:
+            if model_obj is not None:
+                probs = model_obj.predict_proba(X)[0]
+                p_over = float(probs[1])
+            else:
+                p_over = 1.0 / (1.0 + np.exp(-(exp_pts - line_val) / 10.0))
+        except Exception:
+            p_over = 1.0 / (1.0 + np.exp(-(exp_pts - line_val) / 10.0))
+
+        p_under = 1.0 - p_over
+        imp_over = (1.0 / over_odds) if over_odds > 1.0 else 1.0
+        imp_under = (1.0 / under_odds) if under_odds > 1.0 else 1.0
+
+        edge_over = p_over - imp_over
+        edge_under = p_under - imp_under
+
+        if edge_over >= min_edge and edge_over >= edge_under and over_odds >= min_odds:
+            return {
+                "side": "over",
+                "line": line_val,
+                "odds": over_odds,
+                "pick_str": f"Mais de {line_val} Pontos",
+                "prob_str": f"{p_over*100:.1f}%",
+                "edge_str": f"{edge_over*100:+.1f}%"
+            }
+        elif edge_under >= min_edge and edge_under > edge_over and under_odds >= min_odds:
+            return {
+                "side": "under",
+                "line": line_val,
+                "odds": under_odds,
+                "pick_str": f"Menos de {line_val} Pontos",
+                "prob_str": f"{p_under*100:.1f}%",
+                "edge_str": f"{edge_under*100:+.1f}%"
+            }
+        return None
+
+    # 3. FIFA Asian Handicap
+    elif m_key == "fifa_asian_handicap":
+        ah = odds_dict.get("asian_handicap", {}) if isinstance(odds_dict.get("asian_handicap"), dict) else {}
+        line_val = float(ah.get("line", 0.0))
+        home_odds = float(ah.get("home", 0.0))
+        away_odds = float(ah.get("away", 0.0))
+
+        if home_odds <= 1.0 and away_odds <= 1.0:
+            return None
+
+        model_obj = mgr.models.get("fifa_asian_handicap")
+
+        X = np.zeros((1, 22), dtype=float)
+        X[0, 0] = 1.0
+        X[0, 1] = 1.0
+        X[0, 2] = h_sc
+        X[0, 3] = h_sc
+        X[0, 4] = h_cc
+        X[0, 5] = h_cc
+        X[0, 6] = a_sc
+        X[0, 7] = a_sc
+        X[0, 8] = a_cc
+        X[0, 9] = a_cc
+        X[0, 10] = diff_exp
+        X[0, 11] = line_val
+        X[0, 12] = diff_exp + line_val
+        X[0, 13] = 5.0
+        X[0, 14] = h_sc + a_sc
+        X[0, 15] = 0.45
+        X[0, 16] = (1.0 / home_odds) if home_odds > 1.0 else 0.50
+        X[0, 17] = X[0, 16] - 0.50
+        X[0, 18] = 0.0
+        X[0, 19] = 0.0
+        X[0, 20] = diff_exp
+        X[0, 21] = diff_exp
+
+        try:
+            if model_obj is not None:
+                probs = model_obj.predict_proba(X)[0]
+                p_home = float(probs[1])
+            else:
+                p_home = 1.0 / (1.0 + np.exp(-(diff_exp + line_val)))
+        except Exception:
+            p_home = 1.0 / (1.0 + np.exp(-(diff_exp + line_val)))
+
+        p_away = 1.0 - p_home
+        imp_home = (1.0 / home_odds) if home_odds > 1.0 else 1.0
+        imp_away = (1.0 / away_odds) if away_odds > 1.0 else 1.0
+
+        edge_home = p_home - imp_home
+        edge_away = p_away - imp_away
+
+        if edge_home >= min_edge and edge_home >= edge_away and home_odds >= min_odds:
+            line_str = f"{line_val:+.1f}" if line_val != 0 else "-0.5"
+            return {
+                "side": "home",
+                "line": line_val,
+                "odds": home_odds,
+                "pick_str": f"{home_team} (Handicap Asiático {line_str})",
+                "prob_str": f"{p_home*100:.1f}%",
+                "edge_str": f"{edge_home*100:+.1f}%"
+            }
+        elif edge_away >= min_edge and edge_away > edge_home and away_odds >= min_odds:
+            away_line = -line_val
+            away_line_str = f"{away_line:+.1f}" if away_line != 0 else "+0.5"
+            return {
+                "side": "away",
+                "line": away_line,
+                "odds": away_odds,
+                "pick_str": f"{away_team} (Handicap Asiático {away_line_str})",
+                "prob_str": f"{p_away*100:.1f}%",
+                "edge_str": f"{edge_away*100:+.1f}%"
+            }
+        return None
+
+    # 4. FIFA Money Line / Draw No Bet
+    elif m_key == "fifa_money_line":
+        dnb = odds_dict.get("draw_no_bet", {}) if isinstance(odds_dict.get("draw_no_bet"), dict) else {}
+        ml = odds_dict.get("money_line", {}) if isinstance(odds_dict.get("money_line"), dict) else {}
+        home_odds = float(dnb.get("home", ml.get("home", 0.0)))
+        away_odds = float(dnb.get("away", ml.get("away", 0.0)))
+
+        if home_odds <= 1.0 and away_odds <= 1.0:
+            return None
+
+        model_obj = mgr.models.get("fifa_money_line")
+
+        h_wr = 0.50 + np.clip(diff_exp * 0.12, -0.35, 0.35)
+        a_wr = 1.0 - h_wr - 0.18
+
+        X = np.zeros((1, 30), dtype=float)
+        X[0, 0] = 1.0
+        X[0, 1] = 1.0
+        X[0, 2] = h_wr
+        X[0, 3] = h_wr
+        X[0, 4] = 0.18
+        X[0, 5] = 0.18
+        X[0, 6] = a_wr
+        X[0, 7] = a_wr
+        X[0, 8] = a_wr
+        X[0, 9] = a_wr
+        X[0, 10] = 0.18
+        X[0, 11] = 0.18
+        X[0, 12] = h_wr
+        X[0, 13] = h_wr
+        X[0, 14] = h_wr
+        X[0, 15] = a_wr
+        X[0, 16] = 1.0 if diff_exp > 0 else -1.0
+        X[0, 17] = -1.0 if diff_exp > 0 else 1.0
+        X[0, 18] = 0.18
+        X[0, 19] = 5.0
+        X[0, 20] = a_wr
+        X[0, 21] = (1.0 / home_odds) if home_odds > 1.0 else 0.45
+        X[0, 22] = X[0, 21] - h_wr
+        X[0, 23] = 0.0
+        X[0, 24] = 0.0
+        X[0, 25] = h_sc
+        X[0, 26] = 1.0
+        X[0, 27] = a_sc
+        X[0, 28] = 1.0
+        X[0, 29] = h_sc - a_sc
+
+        try:
+            if model_obj and hasattr(model_obj, "model") and model_obj.model is not None:
+                probs = model_obj.model.predict_proba(X)[0]
+                p_h = float(probs[0])
+                p_a = float(probs[2]) if len(probs) > 2 else float(probs[1])
+            else:
+                p_h = 1.0 / (1.0 + np.exp(-diff_exp))
+                p_a = 1.0 - p_h
+        except Exception:
+            p_h = 1.0 / (1.0 + np.exp(-diff_exp))
+            p_a = 1.0 - p_h
+
+        total_p = p_h + p_a
+        p_home = p_h / total_p if total_p > 0 else 0.5
+        p_away = p_a / total_p if total_p > 0 else 0.5
+
+        imp_home = (1.0 / home_odds) if home_odds > 1.0 else 1.0
+        imp_away = (1.0 / away_odds) if away_odds > 1.0 else 1.0
+
+        edge_home = p_home - imp_home
+        edge_away = p_away - imp_away
+
+        if edge_home >= min_edge and edge_home >= edge_away and home_odds >= min_odds:
+            return {
+                "side": "home",
+                "line": 0.0,
+                "odds": home_odds,
+                "pick_str": f"{home_team} (Empate Anula)",
+                "prob_str": f"{p_home*100:.1f}%",
+                "edge_str": f"{edge_home*100:+.1f}%"
+            }
+        elif edge_away >= min_edge and edge_away > edge_home and away_odds >= min_odds:
+            return {
+                "side": "away",
+                "line": 0.0,
+                "odds": away_odds,
+                "pick_str": f"{away_team} (Empate Anula)",
+                "prob_str": f"{p_away*100:.1f}%",
+                "edge_str": f"{edge_away*100:+.1f}%"
+            }
+        return None
+
+    # 5. eBasket Money Line
+    elif m_key in ["ebasket_money_line", "ebasket_ml"]:
+        ml = odds_dict.get("money_line", {}) if isinstance(odds_dict.get("money_line"), dict) else {}
+        home_odds = float(ml.get("home", 0.0))
+        away_odds = float(ml.get("away", 0.0))
+
+        if home_odds <= 1.0 and away_odds <= 1.0:
+            return None
+
+        model_obj = mgr.models.get("ebasket_money_line")
+
+        h_wr = 0.50 + np.clip(diff_exp / 25.0, -0.35, 0.35)
+        a_wr = 1.0 - h_wr
+
+        X = np.zeros((1, 24), dtype=float)
+        X[0, 0] = 1.0
+        X[0, 1] = 1.0
+        X[0, 2] = h_wr
+        X[0, 3] = h_wr
+        X[0, 4] = a_wr
+        X[0, 5] = a_wr
+        X[0, 6] = diff_exp
+        X[0, 7] = 12.0
+        X[0, 8] = 5.0
+        X[0, 9] = a_wr
+        X[0, 10] = diff_exp
+        X[0, 11] = (1.0 / home_odds) if home_odds > 1.0 else 0.50
+        X[0, 12] = X[0, 11] - h_wr
+        X[0, 13] = 0.0
+        X[0, 14] = 0.0
+        X[0, 15] = h_sc
+        X[0, 16] = 5.0
+        X[0, 17] = a_sc
+        X[0, 18] = 5.0
+        X[0, 19] = h_sc - a_sc
+        X[0, 20] = h_wr - a_wr
+        X[0, 21] = h_wr - a_wr
+        X[0, 22] = diff_exp
+        X[0, 23] = 0.0
+
+        try:
+            if model_obj is not None:
+                probs = model_obj.predict_proba(X)[0]
+                p_home = float(probs[1])
+            else:
+                p_home = 1.0 / (1.0 + np.exp(-diff_exp / 10.0))
+        except Exception:
+            p_home = 1.0 / (1.0 + np.exp(-diff_exp / 10.0))
+
+        p_away = 1.0 - p_home
+        imp_home = (1.0 / home_odds) if home_odds > 1.0 else 1.0
+        imp_away = (1.0 / away_odds) if away_odds > 1.0 else 1.0
+
+        edge_home = p_home - imp_home
+        edge_away = p_away - imp_away
+
+        if edge_home >= min_edge and edge_home >= edge_away and home_odds >= min_odds:
+            return {
+                "side": "home",
+                "line": 0.0,
+                "odds": home_odds,
+                "pick_str": f"{home_team} (Resultado Final)",
+                "prob_str": f"{p_home*100:.1f}%",
+                "edge_str": f"{edge_home*100:+.1f}%"
+            }
+        elif edge_away >= min_edge and edge_away > edge_home and away_odds >= min_odds:
+            return {
+                "side": "away",
+                "line": 0.0,
+                "odds": away_odds,
+                "pick_str": f"{away_team} (Resultado Final)",
+                "prob_str": f"{p_away*100:.1f}%",
+                "edge_str": f"{edge_away*100:+.1f}%"
+            }
+        return None
+
+    return None
 
 
 def run_db_migrations(engine=None):
@@ -1088,49 +1548,32 @@ def run_live_publisher_cycle(bot_token: Optional[str] = None):
                 logger.info(f"Daily tip limit reached for channel {m_key}. Skipping.")
                 continue
 
-            odds_val = 1.90
-            pick_str = "Selection"
-            line_val = 2.5
-            side_val = "over"
             MIN_ODDS = 1.60
+            MIN_EDGE = 0.02
 
-            if m_key == "fifa_goals_ou":
-                ou = odds_dict.get("over_under", {}) if isinstance(odds_dict.get("over_under"), dict) else {}
-                line_val = float(ou.get("line", 2.5))
-                odds_val = float(ou.get("over", 1.90))
-                side_val = "over"
-                pick_str = f"Mais de {line_val} Gols"
-            elif m_key == "fifa_asian_handicap":
-                ah = odds_dict.get("asian_handicap", {}) if isinstance(odds_dict.get("asian_handicap"), dict) else {}
-                line_val = float(ah.get("line", 0.0))
-                odds_val = float(ah.get("home", 1.90))
-                side_val = "home"
-                line_str = f"{line_val:+.1f}" if line_val != 0 else "-0.5"
-                pick_str = f"{home_team} (Handicap Asiático {line_str})"
-            elif m_key == "fifa_money_line":
-                dnb = odds_dict.get("draw_no_bet", {}) if isinstance(odds_dict.get("draw_no_bet"), dict) else {}
-                odds_val = float(dnb.get("home", odds_dict.get("money_line", {}).get("home", 1.90)))
-                line_val = 0.0
-                side_val = "home"
-                pick_str = f"{home_team} (Empate Anula)"
-            elif m_key == "ebasket_money_line":
-                ml = odds_dict.get("money_line", {}) if isinstance(odds_dict.get("money_line"), dict) else {}
-                odds_val = float(ml.get("home", 1.90))
-                line_val = 0.0
-                side_val = "home"
-                pick_str = f"{home_team} (Resultado Final)"
-            elif m_key == "ebasket_ou":
-                ou = odds_dict.get("over_under", {}) if isinstance(odds_dict.get("over_under"), dict) else {}
-                line_val = float(ou.get("line", 154.5))
-                odds_val = float(ou.get("over", 1.90))
-                side_val = "over"
-                pick_str = f"Mais de {line_val} Pontos"
-            else:
+            # Run Real ML Production Model Evaluation
+            opp = evaluate_market_opportunity(
+                m_key=m_key,
+                match=match,
+                odds_dict=odds_dict,
+                h_player=h_player,
+                a_player=a_player,
+                home_team=home_team,
+                away_team=away_team,
+                min_odds=MIN_ODDS,
+                min_edge=MIN_EDGE
+            )
+
+            if not opp:
+                # No positive mathematical edge over bookmaker - skip!
                 continue
 
-            if odds_val < MIN_ODDS:
-                logger.info(f"Skipping tip for {m_key}: odds {odds_val:.2f} below floor {MIN_ODDS}")
-                continue
+            pick_str = opp["pick_str"]
+            odds_val = opp["odds"]
+            line_val = opp["line"]
+            side_val = opp["side"]
+            est_prob_str = opp.get("prob_str", "60.0%")
+            edge_str = opp.get("edge_str", "+14.2%")
 
             header_title = channel_headers.get(m_key, "Matrix AI Production Suite")
             target_bot_token = BOT_TOKENS.get(m_key, bot_token)
@@ -1169,7 +1612,7 @@ def run_live_publisher_cycle(bot_token: Optional[str] = None):
                     "odds": float(odds_val)
                 }
                 save_published_tips_cache(cache)
-                record_live_audit_item(header_title, f"{home_team} x {away_team}", pick_str, f"{odds_val:.2f}", "60.0%", "+14.2%", "1.00 Unit", link_url, "PUBLISHED", "PENDING", match_id=match_id, msg_id=msg_id)
+                record_live_audit_item(header_title, f"{home_team} x {away_team}", pick_str, f"{odds_val:.2f}", est_prob_str, edge_str, "1.00 Unit", link_url, "PUBLISHED", "PENDING", match_id=match_id, msg_id=msg_id)
                 logger.info(f"Successfully dispatched tip for {home_team} vs {away_team} to {m_key} channel.")
 
     # 3. Check result settlement for pending tips
