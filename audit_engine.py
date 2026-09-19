@@ -204,6 +204,25 @@ def audit_channel_data(channel_key: str, target_date_str: Optional[str] = None) 
     all_settled_records = []
     seen_settled_keys = set()
 
+    # Build match score lookup from live audit log
+    match_score_lookup = {}
+    if live_audit and isinstance(live_audit, list):
+        for la_item in live_audit:
+            la_mid = str(la_item.get("match_id", "")).strip()
+            la_sc = str(la_item.get("final_score") or la_item.get("score") or la_item.get("score_str") or "").strip()
+            if la_mid and la_sc and la_sc not in ["0-0", "0.0-0.0", ""]:
+                match_score_lookup[la_mid] = la_sc
+
+    # Query Postgres core.results for finished match scores
+    sql_results = """
+        SELECT match_id, CONCAT(final_home_score, '-', final_away_score) 
+        FROM core.results 
+        WHERE final_home_score IS NOT NULL AND final_away_score IS NOT NULL;
+    """
+    for r_row in query_postgres(sql_results):
+        if len(r_row) >= 2 and r_row[0] and r_row[1]:
+            match_score_lookup[str(r_row[0]).strip()] = str(r_row[1]).strip()
+
     if settled_ledger and isinstance(settled_ledger, list):
         for it in settled_ledger:
             ch_k = str(it.get("channel_key", it.get("type", "")))
@@ -212,15 +231,22 @@ def audit_channel_data(channel_key: str, target_date_str: Optional[str] = None) 
                 key = f"{m_id}_{ch_k}"
                 if key not in seen_settled_keys:
                     seen_settled_keys.add(key)
+                    sc_val = str(it.get("final_score") or it.get("score") or it.get("score_str") or match_score_lookup.get(m_id, "")).strip()
+                    it["score"] = sc_val
+                    it["final_score"] = sc_val
+                    it["score_str"] = sc_val
                     all_settled_records.append(it)
 
-    # Query Postgres for ground-truth settled records
+    # Query Postgres for ground-truth settled records with COALESCE join to core.results
     sql_pg_settled = f"""
-        SELECT match_id, channel_key, home_team, away_team, market_type, pick_str,
-               odds, line, side, score_str, outcome, net_units, date_brt, settled_at_brt
-        FROM core.settled_tips
-        WHERE channel_key IN ({','.join(repr(a) for a in aliases)})
-        ORDER BY settled_at_brt ASC;
+        SELECT s.match_id, s.channel_key, s.home_team, s.away_team, s.market_type, s.pick_str,
+               s.odds, s.line, s.side, 
+               COALESCE(NULLIF(s.score_str, ''), CONCAT(r.final_home_score, '-', r.final_away_score), '') as resolved_score,
+               s.outcome, s.net_units, s.date_brt, s.settled_at_brt
+        FROM core.settled_tips s
+        LEFT JOIN core.results r ON (s.match_id = r.match_id)
+        WHERE s.channel_key IN ({','.join(repr(a) for a in aliases)})
+        ORDER BY s.settled_at_brt ASC;
     """
     pg_settled_rows = query_postgres(sql_pg_settled)
     pg_record_count = len(pg_settled_rows)
@@ -230,6 +256,11 @@ def audit_channel_data(channel_key: str, target_date_str: Optional[str] = None) 
             m_id, ch_k, h_t, a_t, m_type, pick, odds, line, side, sc, out, net_u = row[:12]
             d_brt = row[12] if len(row) > 12 else target_date_str
             key = f"{m_id}_{ch_k}"
+            
+            sc_str = str(sc).strip()
+            if (not sc_str or sc_str in ["0-0", "0.0-0.0", "None"]) and m_id in match_score_lookup:
+                sc_str = match_score_lookup[m_id]
+
             if key not in seen_settled_keys:
                 seen_settled_keys.add(key)
                 all_settled_records.append({
@@ -242,7 +273,9 @@ def audit_channel_data(channel_key: str, target_date_str: Optional[str] = None) 
                     "odds": float(odds) if odds else info["default_avg_odds"],
                     "line": float(line) if line else 0.0,
                     "side": side,
-                    "score": sc,
+                    "score": sc_str,
+                    "final_score": sc_str,
+                    "score_str": sc_str,
                     "outcome": out,
                     "net_units": float(net_u) if net_u else 0.0,
                     "date_brt": d_brt
@@ -380,25 +413,27 @@ def audit_channel_data(channel_key: str, target_date_str: Optional[str] = None) 
 
     for r in (today_settled[-15:] if today_settled else mtd_settled[-15:]):
         m_id = str(r.get("match_id", "N/A"))
-        sc = str(r.get("score", r.get("score_str", "0-0")))
+        sc = str(r.get("final_score") or r.get("score") or r.get("score_str") or match_score_lookup.get(m_id, "")).strip()
         out = str(r.get("outcome", "UNKNOWN"))
         line = r.get("line", "N/A")
         od = r.get("odds", info["default_avg_odds"])
         side = r.get("side", r.get("pick_str", "N/A"))
 
         is_zero_zero = (sc in ["0-0", "0.0-0.0", "0 - 0"])
-        if is_zero_zero and out in ["LOSS", "LOST"]:
+        is_premature_loss = is_zero_zero and out in ["LOSS", "LOST"]
+        if is_premature_loss:
             zero_zero_anomalies += 1
 
+        disp_sc = sc if (sc and sc not in ["None", "null"]) else "N/A"
         reconciliation_samples.append({
             "match_id": m_id,
             "market": info["market_name"],
             "line": line,
             "side": side,
             "odds": od,
-            "score": sc,
+            "score": disp_sc,
             "outcome": out,
-            "status": "RECONCILED" if not is_zero_zero else "FLAGGED_0-0"
+            "status": "FLAGGED_0-0" if is_premature_loss else "RECONCILED"
         })
 
     # Host JSON vs Postgres Reconciliation

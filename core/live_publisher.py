@@ -983,7 +983,7 @@ def record_settled_tip(record: Dict[str, Any]):
                     float(record.get("odds", 1.90)),
                     float(record.get("line", 0.0)) if record.get("line") is not None else 0.0,
                     str(record.get("side", "")),
-                    str(record.get("score", record.get("score_str", ""))),
+                    str(record.get("final_score") or record.get("score") or record.get("score_str") or ""),
                     str(record.get("outcome", "")),
                     float(record.get("net_units", 0.0)),
                     str(record.get("date_brt", datetime.now(BRT_TZ).strftime("%Y-%m-%d")))

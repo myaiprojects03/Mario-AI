@@ -113,8 +113,11 @@ def query_postgres_data(today_brt: str):
 
     # 2. Query settled_tips
     sql_settled = f"""
-    SELECT match_id, channel_key, score_str, outcome, net_units, date_brt 
-    FROM core.settled_tips;
+    SELECT s.match_id, s.channel_key, 
+           COALESCE(NULLIF(s.score_str, ''), CONCAT(r.final_home_score, '-', r.final_away_score), '') as score_str,
+           s.outcome, s.net_units, s.date_brt 
+    FROM core.settled_tips s
+    LEFT JOIN core.results r ON (s.match_id = r.match_id);
     """
     cmd_settled = ["docker", "exec", "mario_ai_db", "psql", "-U", "postgres", "-d", "mario_ai", "-t", "-A", "-F", ",", "-c", sql_settled]
     try:
