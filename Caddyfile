@@ -1,0 +1,7 @@
+{
+    email admin@mario-ai.internal
+}
+
+{$DASHBOARD_DOMAIN:24.199.87.126.sslip.io} {
+    reverse_proxy app:8000
+}

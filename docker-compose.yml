@@ -29,5 +29,23 @@ services:
     volumes:
       - ./core/dashboard:/app/core/dashboard
 
+  caddy:
+    image: caddy:alpine
+    container_name: mario_ai_caddy
+    restart: always
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DASHBOARD_DOMAIN=${DASHBOARD_DOMAIN:-24.199.87.126.sslip.io}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+
 volumes:
   postgres_data:
+  caddy_data:
+  caddy_config:

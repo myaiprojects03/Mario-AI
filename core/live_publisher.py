@@ -2387,9 +2387,9 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
 
 def start_dashboard_server():
     try:
-
         port = int(os.getenv("DASHBOARD_PORT", "8000"))
-        uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+        logger.info(f"Launching Mario AI Admin Dashboard server on port {port}...")
+        uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
     except Exception as e:
         logger.error(f"Error starting dashboard server: {e}")
 
@@ -2397,6 +2397,11 @@ def start_dashboard_server():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     logger.info("Starting live publisher standalone service...")
+
+    import threading
+    dash_thread = threading.Thread(target=start_dashboard_server, daemon=True)
+    dash_thread.start()
+    logger.info("Admin Dashboard server background thread started on port 8000.")
 
     while True:
         try:

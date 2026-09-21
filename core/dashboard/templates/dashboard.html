@@ -30,6 +30,10 @@
 
         /* Summary Analytics Grid Card */
         .summary-card { background: #161922; border-radius: 16px; border: 1px solid #262b38; padding: 24px; margin-bottom: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
+        .channel-header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #262b38; }
+        .channel-header-title { font-size: 16px; font-weight: 800; color: #ffffff; display: flex; align-items: center; gap: 10px; }
+        .channel-header-status { background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 700; }
+        
         .main-unit-header { margin-bottom: 20px; }
         .unit-label { font-size: 12px; font-weight: 700; color: #6b7280; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 6px; }
         .unit-value { font-size: 42px; font-weight: 900; color: #10b981; }
@@ -43,38 +47,32 @@
         .sub-metric-subtext { font-size: 11px; color: #6b7280; }
 
         /* Charts Container */
-        .charts-container { display: grid; grid-template-columns: 1fr; gap: 24px; margin-bottom: 24px; }
+        .charts-container { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px; }
+        @media (max-width: 992px) { .charts-container { grid-template-columns: 1fr; } }
         .chart-box { background: #161922; border-radius: 16px; border: 1px solid #262b38; padding: 20px; }
-        .chart-header { font-size: 14px; font-weight: 800; color: #ffffff; letter-spacing: 0.5px; text-transform: uppercase; margin-bottom: 16px; }
+        .chart-header { font-size: 13px; font-weight: 800; color: #ffffff; letter-spacing: 0.5px; text-transform: uppercase; margin-bottom: 16px; }
         .chart-wrapper { position: relative; height: 260px; width: 100%; }
 
-        /* Tables & Sections Grid */
-        .tables-grid-2col { display: grid; grid-template-columns: repeat(auto-fit, minmax(450px, 1fr)); gap: 24px; margin-bottom: 24px; }
-        .section-box { background: #161922; border-radius: 16px; border: 1px solid #262b38; padding: 20px; }
-        .section-title { font-size: 14px; font-weight: 800; color: #ffffff; letter-spacing: 0.5px; text-transform: uppercase; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between; }
-        .section-subtitle { font-size: 11px; color: #6b7280; font-weight: 500; margin-top: -10px; margin-bottom: 14px; }
+        /* Tables & Section Boxes */
+        .section-box { background: #161922; border-radius: 16px; border: 1px solid #262b38; padding: 20px; margin-bottom: 24px; }
+        .section-title { font-size: 14px; font-weight: 800; color: #ffffff; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; display: flex; align-items: center; justify-content: space-between; }
+        .section-subtitle { font-size: 11px; color: #6b7280; margin-bottom: 16px; line-height: 1.4; }
 
-        /* Data Tables */
-        .data-table { width: 100%; border-collapse: collapse; text-align: left; }
-        .data-table th { font-size: 11px; font-weight: 700; color: #6b7280; text-transform: uppercase; padding: 10px 12px; border-bottom: 1px solid #262b38; }
-        .data-table td { font-size: 13px; font-weight: 500; color: #e5e7eb; padding: 12px; border-bottom: 1px solid #1f2430; }
-        .data-table tr:last-child td { border-bottom: none; }
-        .val-green { color: #10b981; font-weight: 700; }
-        .val-red { color: #ef4444; font-weight: 700; }
-        .val-bold { font-weight: 700; color: #ffffff; }
+        .table-responsive { overflow-x: auto; }
+        .data-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; }
+        .data-table th { background: #1f2430; color: #9ca3af; font-weight: 700; padding: 10px 12px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #262b38; }
+        .data-table td { padding: 12px; border-bottom: 1px solid #1f2430; color: #e5e7eb; }
+        .data-table tr:hover td { background: #1a1e29; }
 
-        /* Latest Tips Table Specifics */
-        .btn-bet-link { background: #3b82f6; color: #ffffff; padding: 6px 12px; border-radius: 6px; text-decoration: none; font-size: 11px; font-weight: 700; display: inline-block; }
-        .btn-bet-link:hover { background: #2563eb; }
-        .badge-published { background: rgba(59, 130, 246, 0.15); color: #3b82f6; border: 1px solid rgba(59, 130, 246, 0.3); padding: 3px 8px; border-radius: 4px; font-size: 10px; font-weight: 700; }
-        .badge-filtered { background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); padding: 3px 8px; border-radius: 4px; font-size: 10px; font-weight: 700; }
+        /* Badges */
+        .badge-published { background: rgba(16, 185, 129, 0.1); color: #10b981; padding: 3px 8px; border-radius: 4px; font-weight: 600; font-size: 11px; }
+        .badge-filtered { background: rgba(239, 68, 68, 0.1); color: #ef4444; padding: 3px 8px; border-radius: 4px; font-weight: 600; font-size: 11px; }
+        .badge-live { background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); padding: 2px 6px; border-radius: 4px; font-weight: 700; font-size: 10px; }
+        .btn-bet-link { background: #2563eb; color: #ffffff; text-decoration: none; padding: 4px 8px; border-radius: 4px; font-weight: 600; font-size: 11px; display: inline-block; }
+        .btn-bet-link:hover { background: #1d4ed8; }
 
-        /* Table scroll wrappers */
-        .table-responsive { overflow-x: auto; max-height: 400px; overflow-y: auto; }
-        ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: #161922; }
-        ::-webkit-scrollbar-thumb { background: #262b38; border-radius: 3px; }
-
+        .two-col-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+        @media (max-width: 900px) { .two-col-grid { grid-template-columns: 1fr; } }
     </style>
 </head>
 <body>
@@ -82,104 +80,114 @@
     <!-- Top Navigation Bar -->
     <div class="top-nav">
         <div class="nav-title-group">
-            <div class="nav-title">MARIO AI - PAINEL DE TIPS</div>
-            <span class="badge-live-prod">LIVE PRODUCTION DATA (2026-09-01 TO PRESENT)</span>
+            <div class="nav-title">MARIO AI • PAINEL DE PERFORMANCE</div>
+            <div class="badge-live-prod">PRODUÇÃO OFICIAL (BRT)</div>
         </div>
         <a href="/logout" class="btn-logout">Sair</a>
     </div>
 
-    <!-- Controls Bar: Channel Selectors & Date Range -->
+    <!-- Filter Controls Bar -->
     <div class="controls-bar">
-        <!-- Date Filters -->
-        <div class="filter-group" id="date-filters">
-            <button class="filter-pill" onclick="setDateFilter('today', this)">Today</button>
-            <button class="filter-pill" onclick="setDateFilter('7d', this)">7 Days</button>
-            <button class="filter-pill" onclick="setDateFilter('14d', this)">14 Days</button>
-            <button class="filter-pill active" onclick="setDateFilter('all', this)">All</button>
-            <span class="filter-pill live-pill">LIVE</span>
-        </div>
-
-        <!-- Custom Date Range -->
-        <div class="date-range-group">
-            <span style="font-size: 11px; color: #6b7280; font-weight: 700;">DE:</span>
-            <input type="date" class="date-input" id="date-start" value="2026-04-19" onchange="triggerCustomFilter()">
-            <span style="font-size: 11px; color: #6b7280; font-weight: 700;">ATÉ:</span>
-            <input type="date" class="date-input" id="date-end" value="2026-09-10" onchange="triggerCustomFilter()">
-        </div>
-    </div>
-
-    <!-- Channel Navigation Tabs -->
-    <div class="controls-bar" style="margin-bottom: 24px;">
+        <!-- Channel Selector -->
         <div class="filter-group" id="channel-tabs">
             <button class="filter-pill active" onclick="switchChannel('all', this)">All (Master View)</button>
-            <button class="filter-pill" onclick="switchChannel('fifa_goals_ou', this)">FIFA Goals O/U</button>
-            <button class="filter-pill" onclick="switchChannel('fifa_asian_handicap', this)">FIFA Asian Handicap</button>
-            <button class="filter-pill" onclick="switchChannel('fifa_money_line', this)">FIFA Money Line (DNB)</button>
-            <button class="filter-pill" onclick="switchChannel('ebasket_money_line', this)">eBasketball Money Line</button>
-            <button class="filter-pill" onclick="switchChannel('ebasket_ou', this)">eBasketball O/U</button>
+            <button class="filter-pill" onclick="switchChannel('fifa_goals_ou', this)">FIFA Goals O/U • LIVE 🟢</button>
+            <button class="filter-pill" onclick="switchChannel('fifa_asian_handicap', this)">FIFA Asian Handicap • LIVE 🟢</button>
+            <button class="filter-pill" onclick="switchChannel('fifa_money_line', this)">FIFA Money Line • LIVE 🟢</button>
+            <button class="filter-pill" onclick="switchChannel('ebasket_money_line', this)">eBasketball Money Line • LIVE 🟢</button>
+            <button class="filter-pill" onclick="switchChannel('ebasket_ou', this)">eBasketball O/U • LIVE 🟢</button>
+        </div>
+
+        <!-- Date Range Filter -->
+        <div class="filter-group" id="date-filters">
+            <button class="filter-pill active" onclick="setDateFilter('all', this)">All</button>
+            <button class="filter-pill" onclick="setDateFilter('today', this)">Today</button>
+            <button class="filter-pill" onclick="setDateFilter('7d', this)">7 days</button>
+            <button class="filter-pill" onclick="setDateFilter('14d', this)">14 days</button>
+            
+            <div class="date-range-group">
+                <input type="date" id="date-start" class="date-input" onchange="triggerCustomFilter()">
+                <span style="color:#6b7280;">→</span>
+                <input type="date" id="date-end" class="date-input" onchange="triggerCustomFilter()">
+            </div>
         </div>
     </div>
 
-    <!-- Summary Metrics Card (Reference Layout 1) -->
+    <!-- Main Summary Metrics Card -->
     <div class="summary-card">
+        <div class="channel-header-row">
+            <div class="channel-header-title" id="selected-channel-title">
+                All Channels (Master View)
+            </div>
+            <div class="channel-header-status" id="selected-channel-status">
+                LIVE 🟢
+            </div>
+        </div>
+
         <div class="main-unit-header">
             <div class="unit-label">ACCUMULATED UNITS</div>
-            <div class="unit-value" id="val-accumulated-units">+153,2u</div>
+            <div class="unit-value" id="val-accumulated-units">+0.00u</div>
         </div>
 
         <div class="metrics-grid-4col">
             <div class="sub-metric-item">
                 <div class="sub-metric-label">ROI POR TIP</div>
-                <div class="sub-metric-val green" id="val-roi">+9,1%</div>
+                <div class="sub-metric-val green" id="val-roi">+0.0%</div>
+                <div class="sub-metric-subtext">Retorno por unidade</div>
             </div>
             <div class="sub-metric-item">
                 <div class="sub-metric-label">HIT RATE</div>
-                <div class="sub-metric-val" id="val-hit-rate">53,8%</div>
+                <div class="sub-metric-val" id="val-hit-rate">0.0%</div>
+                <div class="sub-metric-subtext">Taxa de acerto global</div>
             </div>
             <div class="sub-metric-item">
                 <div class="sub-metric-label">TIPS AVALIADAS</div>
-                <div class="sub-metric-val" id="val-evaluated-tips">1.690</div>
+                <div class="sub-metric-val" id="val-evaluated-tips">0</div>
+                <div class="sub-metric-subtext" id="val-pending-subtext">0 pendentes em andamento</div>
             </div>
             <div class="sub-metric-item">
                 <div class="sub-metric-label">TIPS POR DIA</div>
-                <div class="sub-metric-val" id="val-tips-per-day">84</div>
+                <div class="sub-metric-val" id="val-tips-per-day">0</div>
+                <div class="sub-metric-subtext">Média diária real</div>
             </div>
             <div class="sub-metric-item">
                 <div class="sub-metric-label">RITMO MENSAL</div>
-                <div class="sub-metric-val" id="val-monthly-pace">~2535 tips</div>
+                <div class="sub-metric-val" id="val-monthly-pace">~0 tips</div>
+                <div class="sub-metric-subtext">Projeção mensal</div>
             </div>
             <div class="sub-metric-item">
                 <div class="sub-metric-label">ESTIMATIVA MENSAL</div>
-                <div class="sub-metric-val green" id="val-monthly-estimate">+130 a +330u</div>
-                <div class="sub-metric-subtext">faixa · alta variancia</div>
+                <div class="sub-metric-val green" id="val-monthly-estimate">+0.0 to +0.0u</div>
+                <div class="sub-metric-subtext">Banda esperada de retorno</div>
             </div>
             <div class="sub-metric-item">
                 <div class="sub-metric-label">DRAWDOWN MÁX.</div>
-                <div class="sub-metric-val red" id="val-max-drawdown">-25,6u</div>
-                <div class="sub-metric-subtext" id="val-drawdown-dates">27/07 -> 29/07</div>
+                <div class="sub-metric-val red" id="val-max-drawdown">-0.00u</div>
+                <div class="sub-metric-subtext" id="val-drawdown-dates">N/A</div>
             </div>
             <div class="sub-metric-item">
                 <div class="sub-metric-label">MAIOR SEQ. (W / L)</div>
-                <div class="sub-metric-val" id="val-streaks">33 / 19</div>
+                <div class="sub-metric-val" id="val-streaks">0 / 0</div>
+                <div class="sub-metric-subtext">Sequências recordes</div>
             </div>
             <div class="sub-metric-item">
                 <div class="sub-metric-label">MELHOR DIA</div>
-                <div class="sub-metric-val green" id="val-best-day">+54,5u</div>
-                <div class="sub-metric-subtext" id="val-best-day-date">16/07</div>
+                <div class="sub-metric-val green" id="val-best-day">+0.00u</div>
+                <div class="sub-metric-subtext">Maior ganho diário</div>
             </div>
             <div class="sub-metric-item">
                 <div class="sub-metric-label">PIOR DIA</div>
-                <div class="sub-metric-val red" id="val-worst-day">-17,1u</div>
-                <div class="sub-metric-subtext" id="val-worst-day-date">28/07</div>
+                <div class="sub-metric-val red" id="val-worst-day">-0.00u</div>
+                <div class="sub-metric-subtext">Maior perda diária</div>
             </div>
         </div>
     </div>
 
     <!-- Charts Container -->
     <div class="charts-container">
-        <!-- Accumulated Units Line Chart -->
+        <!-- Cumulative Profit Line Chart -->
         <div class="chart-box">
-            <div class="chart-header">ACCUMULATED UNITS</div>
+            <div class="chart-header">ACCUMULATED UNITS (CURVA DE CRESCIMENTO)</div>
             <div class="chart-wrapper">
                 <canvas id="chart-cumulative"></canvas>
             </div>
@@ -187,43 +195,55 @@
 
         <!-- Daily Results Bar Chart -->
         <div class="chart-box">
-            <div class="chart-header">DAILY RESULTS</div>
+            <div class="chart-header">DAILY RESULTS (VERDE = POSITIVO / VERMELHO = NEGATIVO)</div>
             <div class="chart-wrapper">
                 <canvas id="chart-daily"></canvas>
             </div>
         </div>
     </div>
 
-    <!-- Validation Signals Section -->
-    <div class="section-box" style="margin-bottom: 24px;">
+    <!-- Performance by Market / Category Section -->
+    <div class="section-box">
         <div class="section-title">
-            <span>UNDER VALIDATION (DRY RUN - NOT SENT TO CHANNEL)</span>
+            <span>PERFORMANCE POR MERCADO / CANAL</span>
+            <span class="badge-live">DADOS RECONCILIADOS</span>
         </div>
-        <div class="section-subtitle">Signals and leagues measured by the system without publishing. Only included in the product after passing historical and live validation — results here are experimental, not active tips.</div>
-        
+        <div class="section-subtitle">
+            Métricas de desempenho calculadas por mercado para o período selecionado. Dados sincronizados com o relatório diário e mensal oficial.
+        </div>
         <div class="table-responsive">
             <table class="data-table">
                 <thead>
                     <tr>
-                        <th>SINAL / LIGA</th>
-                        <th>TIPS</th>
+                        <th>MERCADO / CANAL</th>
+                        <th>STATUS</th>
+                        <th>TIPS AVALIADAS</th>
+                        <th>WINS</th>
+                        <th>LOSSES</th>
+                        <th>VOIDS</th>
+                        <th>HALF W / L</th>
                         <th>HIT RATE</th>
-                        <th>UNITS</th>
+                        <th>NET UNITS</th>
                         <th>ROI</th>
+                        <th>ODDS MÉD.</th>
+                        <th>PENDENTES</th>
                     </tr>
                 </thead>
-                <tbody id="tbody-validation">
-                    <!-- Populated dynamically via JS -->
+                <tbody id="tbody-market-breakdown">
+                    <tr><td colspan="12" style="text-align:center;color:#6b7280;padding:16px;">Carregando métricas de mercados...</td></tr>
                 </tbody>
             </table>
         </div>
     </div>
 
-    <!-- Player Performance Tables (Side by Side) -->
-    <div class="tables-grid-2col">
+    <!-- Two-Column Grid: Top Players & Players to Monitor -->
+    <div class="two-col-grid">
         <!-- Most Profitable Players -->
         <div class="section-box">
-            <div class="section-title">MOST PROFITABLE PLAYERS</div>
+            <div class="section-title">
+                <span>MOST PROFITABLE PLAYERS</span>
+            </div>
+            <div class="section-subtitle">Estatísticas históricas de jogadores mais lucrativos no período (mínimo de 3 tips). Uso estritamente analítico.</div>
             <div class="table-responsive">
                 <table class="data-table">
                     <thead>
@@ -236,15 +256,18 @@
                         </tr>
                     </thead>
                     <tbody id="tbody-top-players">
-                        <!-- Populated dynamically via JS -->
+                        <tr><td colspan="5" style="text-align:center;color:#6b7280;">Carregando estatísticas...</td></tr>
                     </tbody>
                 </table>
             </div>
         </div>
 
-        <!-- Players to Avoid -->
+        <!-- Players to Avoid / Monitor -->
         <div class="section-box">
-            <div class="section-title">PLAYERS TO AVOID</div>
+            <div class="section-title">
+                <span>PLAYERS TO MONITOR / UNDERPERFORMING</span>
+            </div>
+            <div class="section-subtitle">Jogadores com histórico desfavorável sob observação estatística. Não constitui recomendação automatizada.</div>
             <div class="table-responsive">
                 <table class="data-table">
                     <thead>
@@ -257,43 +280,74 @@
                         </tr>
                     </thead>
                     <tbody id="tbody-avoid-players">
-                        <!-- Populated dynamically via JS -->
+                        <tr><td colspan="5" style="text-align:center;color:#6b7280;">Carregando estatísticas...</td></tr>
                     </tbody>
                 </table>
             </div>
         </div>
     </div>
 
-    <!-- Latest Tips Table (Últimas Tips Enviadas) -->
+    <!-- Validation Signals Section -->
     <div class="section-box">
-        <div class="section-title">ÚLTIMAS TIPS ENVIADAS</div>
+        <div class="section-title">
+            <span>UNDER VALIDATION (DRY RUN - NOT SENT TO CHANNEL)</span>
+        </div>
+        <div class="section-subtitle">
+            Signals and leagues measured by the system without publishing. Only included in the product after passing historical and live validation — results here are experimental, not active tips.
+        </div>
         <div class="table-responsive">
             <table class="data-table">
                 <thead>
                     <tr>
-                        <th>JOGO EM (BRT)</th>
-                        <th>MERCADO</th>
-                        <th>PARTIDA / FIXTURE</th>
-                        <th>TIP / PICK</th>
-                        <th>ODD</th>
-                        <th>PROB. EST.</th>
-                        <th>EDGE</th>
-                        <th>STAKE</th>
-                        <th>TIMING AUDIT</th>
-                        <th>BET365 STATUS</th>
-                        <th>RESULT</th>
-                        <th>TELEGRAM STATUS</th>
-                        <th>LINK DIRECTO</th>
+                        <th>SINAL / LIGA</th>
+                        <th>TIPS</th>
+                        <th>HIT RATE</th>
+                        <th>UNITS</th>
+                        <th>ROI</th>
+                        <th>STATUS</th>
                     </tr>
                 </thead>
-                <tbody id="tbody-tips">
-                    <!-- Populated dynamically via JS -->
+                <tbody id="tbody-validation">
+                    <tr><td colspan="6" style="text-align:center;color:#6b7280;">Carregando sinais experimentais...</td></tr>
                 </tbody>
             </table>
         </div>
     </div>
 
-    <!-- JavaScript Analytics & Interactive Chart Engines -->
+    <!-- Latest Dispatched Tips Table -->
+    <div class="section-box">
+        <div class="section-title">
+            <span>ÚLTIMAS TIPS ENVIADAS (HORÁRIO DE BRASÍLIA - BRT)</span>
+        </div>
+        <div class="section-subtitle">
+            Registro detalhado de tips publicadas nos canais oficiais com status de liquidação e verificação de links.
+        </div>
+        <div class="table-responsive">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>HORA (BRT)</th>
+                        <th>MERCADO</th>
+                        <th>CONFRONTO</th>
+                        <th>SELEÇÃO</th>
+                        <th>ODDS</th>
+                        <th>EST. PROB</th>
+                        <th>EDGE</th>
+                        <th>STAKE</th>
+                        <th>AUDITORIA</th>
+                        <th>LINK</th>
+                        <th>RESULTADO</th>
+                        <th>DISPARO</th>
+                        <th>AÇÃO</th>
+                    </tr>
+                </thead>
+                <tbody id="tbody-tips">
+                    <tr><td colspan="13" style="text-align:center;color:#6b7280;padding:20px;">Carregando tips...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
     <script>
         let activeChannel = 'all';
         let activeDateFilter = 'all';
@@ -301,14 +355,19 @@
         let chartDailyInstance = null;
 
         window.addEventListener('DOMContentLoaded', () => {
+            refreshAllData();
+            // Polling interval: 15 seconds
+            setInterval(refreshAllData, 15000);
+        });
+
+        function refreshAllData() {
             fetchAnalytics();
             fetchChartsData();
-            fetchValidationSignals();
+            fetchMarketBreakdown();
             fetchPlayerStats();
+            fetchValidationSignals();
             fetchTipsTable();
-
-            setInterval(fetchTipsTable, 15000);
-        });
+        }
 
         function getQueryString() {
             let qs = `channel_id=${encodeURIComponent(activeChannel)}&filter_days=${encodeURIComponent(activeDateFilter)}`;
@@ -326,29 +385,20 @@
             activeChannel = channelId;
             document.querySelectorAll('#channel-tabs .filter-pill').forEach(el => el.classList.remove('active'));
             element.classList.add('active');
-
-            fetchAnalytics();
-            fetchChartsData();
-            fetchTipsTable();
+            refreshAllData();
         }
 
         function setDateFilter(filterKey, element) {
             activeDateFilter = filterKey;
             document.querySelectorAll('#date-filters .filter-pill').forEach(el => el.classList.remove('active'));
             element.classList.add('active');
-
-            fetchAnalytics();
-            fetchChartsData();
-            fetchTipsTable();
+            refreshAllData();
         }
 
         function triggerCustomFilter() {
             activeDateFilter = 'custom';
             document.querySelectorAll('#date-filters .filter-pill').forEach(el => el.classList.remove('active'));
-
-            fetchAnalytics();
-            fetchChartsData();
-            fetchTipsTable();
+            refreshAllData();
         }
 
         async function fetchAnalytics() {
@@ -357,10 +407,21 @@
                 const data = await res.json();
                 const a = data.analytics;
 
-                document.getElementById('val-accumulated-units').innerText = a.accumulated_units;
-                document.getElementById('val-roi').innerText = a.roi;
+                document.getElementById('selected-channel-title').innerText = a.channel_name;
+                document.getElementById('selected-channel-status').innerText = a.channel_status + ' 🟢';
+
+                const valUnits = document.getElementById('val-accumulated-units');
+                valUnits.innerText = a.accumulated_units;
+                valUnits.style.color = a.accumulated_units.startsWith('-') ? '#ef4444' : '#10b981';
+
+                const valRoi = document.getElementById('val-roi');
+                valRoi.innerText = a.roi;
+                valRoi.className = a.roi.startsWith('-') ? 'sub-metric-val red' : 'sub-metric-val green';
+
                 document.getElementById('val-hit-rate').innerText = a.hit_rate;
                 document.getElementById('val-evaluated-tips').innerText = a.evaluated_tips;
+                document.getElementById('val-pending-subtext').innerText = `${a.pending_tips} pendentes em andamento`;
+
                 document.getElementById('val-tips-per-day').innerText = a.tips_per_day;
                 document.getElementById('val-monthly-pace').innerText = a.monthly_pace;
                 document.getElementById('val-monthly-estimate').innerText = a.monthly_estimate;
@@ -378,11 +439,212 @@
             try {
                 const res = await fetch(`/api/charts_data?${getQueryString()}`);
                 const data = await res.json();
-
                 renderCumulativeChart(data.labels, data.cumulative_units);
                 renderDailyChart(data.labels, data.daily_results);
             } catch (err) {
                 console.error("Error fetching charts data:", err);
+            }
+        }
+
+        function renderCumulativeChart(labels, data) {
+            const canvas = document.getElementById('chart-cumulative');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            if (chartCumulativeInstance) {
+                chartCumulativeInstance.destroy();
+            }
+
+            let grad = ctx.createLinearGradient(0, 0, 0, 260);
+            grad.addColorStop(0, 'rgba(16, 185, 129, 0.25)');
+            grad.addColorStop(1, 'rgba(16, 185, 129, 0.0)');
+
+            chartCumulativeInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels.length ? labels : ['Sem dados'],
+                    datasets: [{
+                        label: 'Accumulated Units',
+                        data: data.length ? data : [0],
+                        borderColor: '#10b981',
+                        backgroundColor: grad,
+                        fill: true,
+                        tension: 0.3,
+                        borderWidth: 2.5,
+                        pointRadius: 3,
+                        pointHoverRadius: 6,
+                        pointBackgroundColor: '#10b981'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            grid: { color: '#1f2430' },
+                            ticks: { color: '#9ca3af', font: { size: 11 } }
+                        },
+                        y: {
+                            grid: { color: '#1f2430' },
+                            ticks: { color: '#9ca3af', font: { size: 11 } }
+                        }
+                    },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return (context.raw >= 0 ? '+' : '') + context.raw + ' Units';
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderDailyChart(labels, data) {
+            const canvas = document.getElementById('chart-daily');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            if (chartDailyInstance) {
+                chartDailyInstance.destroy();
+            }
+
+            const bgColors = data.map(v => v >= 0 ? '#10b981' : '#ef4444');
+
+            chartDailyInstance = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels.length ? labels : ['Sem dados'],
+                    datasets: [{
+                        label: 'Daily Result (Units)',
+                        data: data.length ? data : [0],
+                        backgroundColor: bgColors.length ? bgColors : ['#10b981'],
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            grid: { color: '#1f2430' },
+                            ticks: { color: '#9ca3af', font: { size: 11 } }
+                        },
+                        y: {
+                            grid: { color: '#1f2430' },
+                            ticks: { color: '#9ca3af', font: { size: 11 } }
+                        }
+                    },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return (context.raw >= 0 ? '+' : '') + context.raw + ' Units';
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        async function fetchMarketBreakdown() {
+            try {
+                const res = await fetch(`/api/market_breakdown?filter_days=${encodeURIComponent(activeDateFilter)}`);
+                const data = await res.json();
+                const tbody = document.getElementById('tbody-market-breakdown');
+                tbody.innerHTML = '';
+
+                if (!data.markets || data.markets.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:#6b7280;padding:16px;">Sem dados de mercados</td></tr>';
+                    return;
+                }
+
+                data.markets.forEach(m => {
+                    const unitColor = m.net_units.startsWith('-') ? '#ef4444' : '#10b981';
+                    const roiColor = m.roi.startsWith('-') ? '#ef4444' : '#10b981';
+                    tbody.innerHTML += `
+                        <tr>
+                            <td><strong>${m.market_name}</strong></td>
+                            <td><span class="badge-live">${m.status} 🟢</span></td>
+                            <td>${m.evaluated_tips}</td>
+                            <td style="color:#10b981;font-weight:600;">${m.wins}</td>
+                            <td style="color:#ef4444;font-weight:600;">${m.losses}</td>
+                            <td>${m.voids}</td>
+                            <td>${m.half_wins} / ${m.half_losses}</td>
+                            <td><strong>${m.hit_rate}</strong></td>
+                            <td style="color:${unitColor};font-weight:800;">${m.net_units}</td>
+                            <td style="color:${roiColor};font-weight:700;">${m.roi}</td>
+                            <td>${m.avg_odds}</td>
+                            <td style="color:#fbbf24;font-weight:600;">${m.pending_tips}</td>
+                        </tr>
+                    `;
+                });
+            } catch (err) {
+                console.error("Error fetching market breakdown:", err);
+            }
+        }
+
+        async function fetchPlayerStats() {
+            try {
+                const res = await fetch(`/api/player_stats?channel_id=${encodeURIComponent(activeChannel)}`);
+                const data = await res.json();
+
+                const topBody = document.getElementById('tbody-top-players');
+                topBody.innerHTML = '';
+                (data.top_players || []).forEach(p => {
+                    topBody.innerHTML += `
+                        <tr>
+                            <td><strong>${p.player}</strong></td>
+                            <td>${p.tips}</td>
+                            <td>${p.hit_rate}</td>
+                            <td style="color:#10b981;font-weight:700;">${p.units}</td>
+                            <td style="color:#10b981;">${p.roi}</td>
+                        </tr>
+                    `;
+                });
+
+                const avoidBody = document.getElementById('tbody-avoid-players');
+                avoidBody.innerHTML = '';
+                (data.avoid_players || []).forEach(p => {
+                    avoidBody.innerHTML += `
+                        <tr>
+                            <td><strong>${p.player}</strong></td>
+                            <td>${p.tips}</td>
+                            <td>${p.hit_rate}</td>
+                            <td style="color:#ef4444;font-weight:700;">${p.units}</td>
+                            <td style="color:#ef4444;">${p.roi}</td>
+                        </tr>
+                    `;
+                });
+            } catch (err) {
+                console.error("Error fetching player stats:", err);
+            }
+        }
+
+        async function fetchValidationSignals() {
+            try {
+                const res = await fetch('/api/validation_signals');
+                const data = await res.json();
+                const tbody = document.getElementById('tbody-validation');
+                tbody.innerHTML = '';
+
+                (data.signals || []).forEach(s => {
+                    tbody.innerHTML += `
+                        <tr>
+                            <td><strong>${s.signal}</strong></td>
+                            <td>${s.tips}</td>
+                            <td>${s.hit_rate}</td>
+                            <td style="color:${s.units.startsWith('-') ? '#ef4444' : '#10b981'};font-weight:700;">${s.units}</td>
+                            <td style="color:${s.roi.startsWith('-') ? '#ef4444' : '#10b981'};">${s.roi}</td>
+                            <td><span style="font-size:11px;font-weight:700;color:#9ca3af;">${s.status}</span></td>
+                        </tr>
+                    `;
+                });
+            } catch (err) {
+                console.error("Error fetching validation signals:", err);
             }
         }
 
@@ -394,33 +656,31 @@
                 tbody.innerHTML = '';
 
                 if (!data.tips || data.tips.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="13" style="text-align:center;color:#6b7280;padding:20px;">No tips recorded for selected filters</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="13" style="text-align:center;color:#6b7280;padding:20px;">Nenhuma tip encontrada para os filtros selecionados</td></tr>';
                     return;
                 }
 
                 data.tips.forEach(tip => {
                     let statusBadge = '<span class="badge-published">PUBLISHED</span>';
-                    if (tip.delivery_status === 'FILTERED' || tip.status === 'FILTERED') {
-                        statusBadge = '<span class="badge-filtered">FILTERED</span>';
-                    }
-
                     let resBadge = '<span style="color:#fbbf24;font-weight:600;">PENDING</span>';
-                    if (tip.result === 'WIN' || (tip.result && tip.result.includes('Won'))) {
-                        resBadge = '<span style="color:#10b981;font-weight:600;">WON</span>';
-                    } else if (tip.result === 'LOSS' || (tip.result && tip.result.includes('Lost'))) {
-                        resBadge = '<span style="color:#ef4444;font-weight:600;">LOST</span>';
-                    } else if (tip.result === 'HALF_WIN' || tip.result === 'Half Won') {
-                        resBadge = '<span style="color:#10b981;font-weight:600;">HALF WON</span>';
-                    } else if (tip.result === 'HALF_LOSS' || tip.result === 'Half Lost') {
-                        resBadge = '<span style="color:#ef4444;font-weight:600;">HALF LOST</span>';
-                    } else if (tip.result === 'VOID' || tip.result === 'Void') {
-                        resBadge = '<span style="color:#9ca3af;font-weight:600;">VOID</span>';
+
+                    const rUpper = String(tip.result || '').toUpperCase();
+                    if (rUpper === 'WIN' || rUpper === 'WON') {
+                        resBadge = '<span style="color:#10b981;font-weight:700;">WON</span>';
+                    } else if (rUpper === 'LOSS' || rUpper === 'LOST') {
+                        resBadge = '<span style="color:#ef4444;font-weight:700;">LOST</span>';
+                    } else if (rUpper.includes('HALF_WIN') || rUpper.includes('HALF WON')) {
+                        resBadge = '<span style="color:#10b981;font-weight:700;">HALF WON</span>';
+                    } else if (rUpper.includes('HALF_LOSS') || rUpper.includes('HALF LOST')) {
+                        resBadge = '<span style="color:#ef4444;font-weight:700;">HALF LOST</span>';
+                    } else if (rUpper.includes('VOID') || rUpper.includes('PUSH')) {
+                        resBadge = '<span style="color:#9ca3af;font-weight:700;">VOID</span>';
                     }
 
-                    const rowHTML = `
+                    tbody.innerHTML += `
                         <tr>
-                            <td>${tip.timestamp}</td>
-                            <td>${tip.market_name}</td>
+                            <td><small>${tip.timestamp}</small></td>
+                            <td><strong>${tip.market_name}</strong></td>
                             <td>${tip.fixture}</td>
                             <td><strong>${tip.pick}</strong></td>
                             <td>${tip.odds}</td>
@@ -434,7 +694,6 @@
                             <td><a href="${tip.match_link}" target="_blank" class="btn-bet-link">Bet Link</a></td>
                         </tr>
                     `;
-                    tbody.innerHTML += rowHTML;
                 });
             } catch (err) {
                 console.error("Error fetching tips table:", err);
