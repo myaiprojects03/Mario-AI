@@ -221,16 +221,52 @@ Each channel was independently audited against the four technical factors reques
     return md
 
 
+def format_console_summary(data: Dict[str, Any]) -> str:
+    lines = []
+    lines.append("=" * 80)
+    lines.append("       MARIO AI - CHANNEL-BY-CHANNEL AUDIT & COMPARISON REPORT")
+    lines.append(f"       Date: {data['target_date']} | Execution: {data['execution_timestamp']}")
+    lines.append("=" * 80)
+
+    for ch in data["channels"]:
+        lines.append("")
+        lines.append(f"CHANNEL: {ch['title'].upper()} ({ch['market_name']})")
+        lines.append("-" * 80)
+        lines.append(f"  Previously Reported : Daily {ch['prev_daily']:+.2f} U  |  MTD {ch['prev_mtd']:+.2f} U")
+        lines.append(f"  Corrected Audited   : Daily {ch['corr_daily']:+.2f} U  |  MTD {ch['corr_mtd']:+.2f} U")
+        lines.append(f"  Net MTD Variance    : {ch['diff_mtd']:+.2f} Units")
+        lines.append(f"  Activity Volume     : {ch['published']} Published  |  {ch['settled_mtd']} Settled MTD  |  {ch['pending']} Pending")
+        lines.append(f"  Record (W-L-V)      : {ch['wins']} Wins  |  {ch['losses']} Losses  |  {ch['voids']} Voids (Half-Wins: {ch['half_wins']}, Half-Losses: {ch['half_losses']})")
+        lines.append(f"  Performance Metrics : Win Rate: {ch['win_rate']}%  |  ROI: {ch['roi']:+.1f}%  |  Avg Odds: {ch['avg_odds']}")
+        lines.append(f"  Risk Profile        : Max Drawdown: {ch['drawdown']} U  |  Active Loss Streak: {ch['streak']}")
+        
+        attr = ch.get("attribution", {})
+        lines.append("  Root-Cause Attribution:")
+        lines.append(f"    - Primary Factor    : {attr.get('primary_cause', 'Reconciliation')}")
+        lines.append(f"    - 0-0 Settlements   : {attr.get('premature_zero_impact', 'N/A')}")
+        lines.append(f"    - Blind Stub Impact : {attr.get('blind_stub_impact', 'N/A')}")
+        lines.append(f"    - Odds/EV Filter    : {attr.get('odds_ev_filter_impact', 'N/A')}")
+        lines.append(f"    - Model Performance : {attr.get('model_performance_impact', 'N/A')}")
+        lines.append("-" * 80)
+
+    lines.append("")
+    lines.append("=" * 80)
+    lines.append("                       END OF CHANNEL COMPARISON AUDIT")
+    lines.append("=" * 80)
+    return "\n".join(lines)
+
+
 def main():
     target_date = sys.argv[1] if len(sys.argv) > 1 else None
     data = generate_comparison(target_date)
     md_content = format_markdown_table(data)
+    console_text = format_console_summary(data)
 
     out_file = "CHANNEL_COMPARISON_REPORT.md"
     with open(out_file, "w", encoding="utf-8") as f:
         f.write(md_content)
 
-    safe_print("\n" + md_content)
+    safe_print("\n" + console_text)
     safe_print(f"\n[+] Master comparison report saved to: {out_file}")
 
 

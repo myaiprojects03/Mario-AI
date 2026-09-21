@@ -307,18 +307,64 @@ def format_projections_markdown(data: Dict[str, Any]) -> str:
     return md
 
 
+def format_console_projections(data: Dict[str, Any]) -> str:
+    lines = []
+    lines.append("=" * 80)
+    lines.append("       MARIO AI - PROJECTED SEPTEMBER MONTH-END VALUES")
+    lines.append(f"       Remaining: {data['days_remaining']} Days (Sep {data['current_day']} to Sep 30, 2026)")
+    lines.append(f"       Execution: {data['execution_timestamp']}")
+    lines.append("=" * 80)
+
+    for ch in data["channels"]:
+        lines.append("")
+        lines.append(f"CHANNEL: {ch['title'].upper()} ({ch['market_name']})")
+        lines.append("-" * 80)
+        lines.append(f"  Verified MTD Units    : {ch['verified_mtd_units']:+.2f} Units")
+        lines.append(f"  Pending Exposure      : {ch['pending_exposure']:.2f} Units ({ch['pending_tips']} unsettled tips)")
+        lines.append(f"  Estimated Volume      : {ch['expected_remaining_tips']} remaining tips (~{ch['paced_daily_tips']} tips/day)")
+        lines.append("")
+        
+        c = ch["conservative"]
+        b = ch["baseline"]
+        o = ch["optimistic"]
+        
+        lines.append("  1. CONSERVATIVE CASE (Stress-Test / Lower Bound):")
+        lines.append(f"     Assumptions        : {c['assumptions']}")
+        lines.append(f"     Additional Units   : {c['expected_additional_units']:+.2f} Units")
+        lines.append(f"     Final Sep 30 Units : {c['expected_final_september_units']:+.2f} Units")
+        lines.append("")
+        lines.append("  2. BASELINE CASE (Target Production ML Edge - Recommended):")
+        lines.append(f"     Assumptions        : {b['assumptions']}")
+        lines.append(f"     Additional Units   : {b['expected_additional_units']:+.2f} Units")
+        lines.append(f"     Final Sep 30 Units : {b['expected_final_september_units']:+.2f} Units")
+        lines.append("")
+        lines.append("  3. OPTIMISTIC CASE (High Efficiency Regime):")
+        lines.append(f"     Assumptions        : {o['assumptions']}")
+        lines.append(f"     Additional Units   : {o['expected_additional_units']:+.2f} Units")
+        lines.append(f"     Final Sep 30 Units : {o['expected_final_september_units']:+.2f} Units")
+        lines.append("-" * 80)
+
+    lines.append("")
+    lines.append("=" * 80)
+    lines.append("                       END OF SEPTEMBER PROJECTIONS")
+    lines.append("=" * 80)
+    return "\n".join(lines)
+
+
 def main():
     target_date = sys.argv[1] if len(sys.argv) > 1 else None
     data = calculate_projections(target_date)
     md_content = format_projections_markdown(data)
+    console_text = format_console_projections(data)
 
     out_file = "PROJECTED_SEPTEMBER_VALUES.md"
     with open(out_file, "w", encoding="utf-8") as f:
         f.write(md_content)
 
-    safe_print("\n" + md_content)
+    safe_print("\n" + console_text)
     safe_print(f"\n[+] September forward projections report saved to: {out_file}")
 
 
 if __name__ == "__main__":
     main()
+
