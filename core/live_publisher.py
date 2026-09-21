@@ -111,19 +111,27 @@ def get_model_manager() -> ProductionModelManager:
     return GLOBAL_MODEL_MANAGER
 
 
-def get_player_scoring_averages(player_name: str, sport: str = "fifa") -> Tuple[float, float]:
-    """Queries or uses cached historical scoring averages (scored, conceded) for player."""
+def get_player_scoring_averages(player_name: str, sport: str = "fifa", league: str = "") -> Tuple[float, float]:
+    """Queries or uses cached historical scoring averages (scored, conceded) for player with format-awareness."""
     global PLAYER_STATS_CACHE
+    league_lower = str(league or "").lower()
+    is_ebasket_4x5 = (sport == "ebasket" and (not league or "4x5" in league_lower or "5min" in league_lower or "gg" in league_lower))
+
+    # Format-calibrated baselines (55.6 per team for 4x5 mins GG League = 111.2 pts total)
+    def_scored = 2.2 if sport == "fifa" else (55.6 if is_ebasket_4x5 else 75.0)
+    def_conceded = 2.2 if sport == "fifa" else (55.6 if is_ebasket_4x5 else 75.0)
+
     if not player_name:
-        return (2.2, 2.2) if sport == "fifa" else (78.0, 78.0)
+        return (def_scored, def_conceded)
 
     clean_name = player_name.strip().lower()
-    cache_key = f"{sport}_{clean_name}"
+    # Extract player handle inside parentheses if present e.g. "MIA Heat (CARNAGE)" -> "carnage"
+    m_handle = re.search(r"\((.*?)\)", clean_name)
+    pure_handle = m_handle.group(1).strip() if m_handle else clean_name
+
+    cache_key = f"{sport}_{pure_handle}_{'4x5' if is_ebasket_4x5 else 'std'}"
     if cache_key in PLAYER_STATS_CACHE:
         return PLAYER_STATS_CACHE[cache_key][:2]
-
-    def_scored = 2.2 if sport == "fifa" else 78.0
-    def_conceded = 2.2 if sport == "fifa" else 78.0
 
     db_url = os.getenv("DATABASE_URL") or settings.DATABASE_URL
     if db_url:
@@ -134,12 +142,18 @@ def get_player_scoring_averages(player_name: str, sport: str = "fifa") -> Tuple[
                     SELECT AVG(r.final_home_score) as avg_sc, AVG(r.final_away_score) as avg_cc, COUNT(*) as cnt
                     FROM core.results r
                     JOIN core.matches m ON r.match_id = m.match_id
-                    WHERE m.raw_payload->'home'->>'name' ILIKE :p OR m.home_team ILIKE :p
+                    WHERE (m.home_team ILIKE :p OR m.away_team ILIKE :p OR m.raw_payload::text ILIKE :p)
+                      AND r.final_home_score IS NOT NULL
                 """)
-                row = conn.execute(query, {"p": f"%{clean_name}%"}).fetchone()
+                row = conn.execute(query, {"p": f"%{pure_handle}%"}).fetchone()
                 if row and row[0] is not None and row[2] >= 3:
                     avg_sc = float(row[0])
                     avg_cc = float(row[1]) if row[1] is not None else def_conceded
+                    # Rescale if match was on 40/48 min format (>70) but current league is 4x5 mins (20 mins)
+                    if is_ebasket_4x5 and avg_sc > 70.0:
+                        avg_sc = avg_sc * (20.0 / 40.0)
+                    if is_ebasket_4x5 and avg_cc > 70.0:
+                        avg_cc = avg_cc * (20.0 / 40.0)
                     PLAYER_STATS_CACHE[cache_key] = (avg_sc, avg_cc, int(row[2]))
                     return (avg_sc, avg_cc)
         except Exception:
@@ -168,8 +182,9 @@ def evaluate_market_opportunity(
     mgr = get_model_manager()
     sport = "ebasket" if "ebasket" in m_key else "fifa"
 
-    h_sc, h_cc = get_player_scoring_averages(h_player, sport)
-    a_sc, a_cc = get_player_scoring_averages(a_player, sport)
+    league_name = str(match.get("league") or match.get("tournament") or "")
+    h_sc, h_cc = get_player_scoring_averages(h_player, sport, league_name)
+    a_sc, a_cc = get_player_scoring_averages(a_player, sport, league_name)
     diff_exp = (h_sc - h_cc) - (a_sc - a_cc)
 
     # 1. FIFA Goals Over / Under
@@ -245,27 +260,37 @@ def evaluate_market_opportunity(
     # 2. eBasket Over / Under
     elif m_key in ["ebasket_ou", "ebasket_points"]:
         ou = odds_dict.get("over_under", {}) if isinstance(odds_dict.get("over_under"), dict) else {}
-        line_val = float(ou.get("line", 154.5))
+        line_val = float(ou.get("line", 0.0))
         over_odds = float(ou.get("over", 0.0))
         under_odds = float(ou.get("under", 0.0))
 
-        if over_odds <= 1.0 and under_odds <= 1.0:
+        if (over_odds <= 1.0 and under_odds <= 1.0) or line_val <= 0.0 or line_val > 260.0:
             return None
 
+        # Check format: 4x5 mins (20-min game) vs standard
+        is_4x5 = ("4x5" in league_name.lower() or "5min" in league_name.lower() or "gg" in league_name.lower() or line_val <= 135.0)
+
+        # Scale player averages if on different scale
+        h_pts = (h_sc * (20.0 / 40.0)) if (is_4x5 and h_sc > 70.0) else h_sc
+        a_pts = (a_sc * (20.0 / 40.0)) if (is_4x5 and a_sc > 70.0) else a_sc
+        h_con = (h_cc * (20.0 / 40.0)) if (is_4x5 and h_cc > 70.0) else h_cc
+        a_con = (a_cc * (20.0 / 40.0)) if (is_4x5 and a_cc > 70.0) else a_cc
+
+        exp_pts = (h_pts + a_con) / 2.0 + (a_pts + h_con) / 2.0
+
         model_obj = mgr.models.get("ebasket_ou")
-        exp_pts = (h_sc + a_cc) / 2.0 + (a_sc + h_cc) / 2.0
 
         X = np.zeros((1, 26), dtype=float)
         X[0, 0] = 1.0
         X[0, 1] = 1.0
-        X[0, 2] = h_sc
-        X[0, 3] = h_sc
-        X[0, 4] = h_cc
-        X[0, 5] = h_cc
-        X[0, 6] = a_sc
-        X[0, 7] = a_sc
-        X[0, 8] = a_cc
-        X[0, 9] = a_cc
+        X[0, 2] = h_pts
+        X[0, 3] = h_pts
+        X[0, 4] = h_con
+        X[0, 5] = h_con
+        X[0, 6] = a_pts
+        X[0, 7] = a_pts
+        X[0, 8] = a_con
+        X[0, 9] = a_con
         X[0, 10] = exp_pts
         X[0, 11] = 0.50
         X[0, 12] = line_val
@@ -274,11 +299,11 @@ def evaluate_market_opportunity(
         X[0, 15] = 12.0
         X[0, 16] = 0.0
         X[0, 17] = 0.0
-        X[0, 18] = h_sc
+        X[0, 18] = h_pts
         X[0, 19] = 1.0
-        X[0, 20] = a_sc
+        X[0, 20] = a_pts
         X[0, 21] = 1.0
-        X[0, 22] = h_sc - a_sc
+        X[0, 22] = h_pts - a_pts
         X[0, 23] = exp_pts
         X[0, 24] = exp_pts
         X[0, 25] = 5.0
@@ -286,29 +311,23 @@ def evaluate_market_opportunity(
         try:
             if model_obj is not None:
                 probs = model_obj.predict_proba(X)[0]
+                p_under = float(probs[0])
                 p_over = float(probs[1])
             else:
-                p_over = 1.0 / (1.0 + np.exp(-(exp_pts - line_val) / 10.0))
+                p_over = 1.0 / (1.0 + np.exp(-(exp_pts - line_val) / 8.0))
+                p_under = 1.0 - p_over
         except Exception:
-            p_over = 1.0 / (1.0 + np.exp(-(exp_pts - line_val) / 10.0))
+            p_over = 1.0 / (1.0 + np.exp(-(exp_pts - line_val) / 8.0))
+            p_under = 1.0 - p_over
 
-        p_under = 1.0 - p_over
         imp_over = (1.0 / over_odds) if over_odds > 1.0 else 1.0
         imp_under = (1.0 / under_odds) if under_odds > 1.0 else 1.0
 
         edge_over = p_over - imp_over
         edge_under = p_under - imp_under
 
-        if edge_over >= min_edge and edge_over >= edge_under and over_odds >= min_odds:
-            return {
-                "side": "over",
-                "line": line_val,
-                "odds": over_odds,
-                "pick_str": f"Mais de {line_val} Pontos",
-                "prob_str": f"{p_over*100:.1f}%",
-                "edge_str": f"{edge_over*100:+.1f}%"
-            }
-        elif edge_under >= min_edge and edge_under > edge_over and under_odds >= min_odds:
+        # Genuine mathematical decision: supports both Menos de (Under) and Mais de (Over)
+        if edge_under >= min_edge and edge_under > edge_over and under_odds >= min_odds:
             return {
                 "side": "under",
                 "line": line_val,
@@ -316,6 +335,15 @@ def evaluate_market_opportunity(
                 "pick_str": f"Menos de {line_val} Pontos",
                 "prob_str": f"{p_under*100:.1f}%",
                 "edge_str": f"{edge_under*100:+.1f}%"
+            }
+        elif edge_over >= min_edge and edge_over >= edge_under and over_odds >= min_odds:
+            return {
+                "side": "over",
+                "line": line_val,
+                "odds": over_odds,
+                "pick_str": f"Mais de {line_val} Pontos",
+                "prob_str": f"{p_over*100:.1f}%",
+                "edge_str": f"{edge_over*100:+.1f}%"
             }
         return None
 
