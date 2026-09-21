@@ -2086,8 +2086,10 @@ def evaluate_match_result(t_type: str, side: str, line: float, h_score: float, a
 def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
     """
     Checks pending published tips and updates Telegram results ONLY when matches are 100% finished.
-    Scores are read STRICTLY from verified results (core.results table and confirmed finished history).
-    Pre-match fixtures (core.matches) are NEVER used for score settlement!
+    CRITICAL SPORT ISOLATION:
+    - eSoccer (FIFA) scores (0-10 goals) and eBasket scores (100-180 points) are STRICTLY segregated.
+    - Prevents eSoccer scores (e.g. 3-4) from ever settling eBasket tips (causing false losses on 115.5+ lines).
+    - Enforces hard score plausibility guards before any tip is settled.
     """
     if not cache:
         cache = load_published_tips_cache()
@@ -2101,10 +2103,12 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
             client = None
 
     now_dt = datetime.now(timezone.utc)
-    db_results = {}
+    fifa_db_results = {}
+    ebasket_db_results = {}
+
     pending_ids = list(set([str(v.get("match_id")) for v in cache.values() if isinstance(v, dict) and v.get("match_id")]))
 
-    # 1. Query verified finished matches from JarvisBet API (/history/pre and /history/ebasket/pre)
+    # 1. Query verified finished matches from JarvisBet API with strict sport isolation
     if client:
         queried_players = set()
         for key, info in cache.items():
@@ -2113,7 +2117,9 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
             h_p = str(info.get("home_player") or "").strip()
             a_p = str(info.get("away_player") or "").strip()
             msg_t = str(info.get("msg_text") or "")
-            sport = str(info.get("sport") or ("ebasket" if "ebasket" in str(info.get("type")) else "fifa"))
+            t_type = str(info.get("type", "")).lower()
+            is_ebasket = "ebasket" in t_type or info.get("sport") == "ebasket"
+            sport_tag = "ebasket" if is_ebasket else "fifa"
 
             candidates = [p for p in [h_p, a_p] if p]
             if not candidates and "Teams/Match:" in msg_t:
@@ -2122,11 +2128,12 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                     if len(f_name.strip()) > 1:
                         candidates.append(f_name.strip())
 
-            endpoint = "/history/pre" if sport == "fifa" else "/history/ebasket/pre"
+            endpoint = "/history/ebasket/pre" if is_ebasket else "/history/pre"
             for player in candidates:
-                if player in queried_players or not player:
+                query_key = f"{sport_tag}_{player.lower()}"
+                if query_key in queried_players or not player:
                     continue
-                queried_players.add(player)
+                queried_players.add(query_key)
                 try:
                     resp = client._execute_request("GET", endpoint, params={"homeName": player})
                     if resp.status_code == 200:
@@ -2137,11 +2144,9 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                                 if not isinstance(m, dict):
                                     continue
 
-                                # Strictly verify that the match is ACTUALLY FINISHED
                                 m_status = str(m.get("status") or m.get("state") or "").upper()
                                 is_finished = m.get("isFinished") is True or m_status in ["ENDED", "FINISHED", "FT", "CLOSED"]
 
-                                # If status indicates not started or live, skip
                                 if m_status in ["NOT_STARTED", "PRE_MATCH", "SCHEDULED", "LIVE", "IN_PLAY", "1H", "2H", "HT"]:
                                     continue
 
@@ -2156,20 +2161,35 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                                     try:
                                         fh = float(h_g)
                                         fa = float(a_g)
-                                        # Never accept 0-0 unless explicitly verified as finished
                                         if fh == 0.0 and fa == 0.0 and not is_finished:
                                             continue
                                         score_pair = (fh, fa)
-                                        if b365_id:
-                                            db_results[b365_id] = score_pair
-                                        if m_id:
-                                            db_results[m_id] = score_pair
+
+                                        # Strict Sport Magnitude Validation
+                                        if is_ebasket:
+                                            # Basketball scores: Each team must have at least 15 pts, total >= 45 pts
+                                            if (fh + fa) >= 45.0 and fh >= 15.0 and fa >= 15.0:
+                                                if b365_id:
+                                                    ebasket_db_results[b365_id] = score_pair
+                                                if m_id:
+                                                    ebasket_db_results[m_id] = score_pair
+                                            else:
+                                                logger.warning(f"Rejected non-basketball score for eBasket API match {m_id}/{b365_id}: {fh}-{fa}")
+                                        else:
+                                            # FIFA soccer scores: Total goals cannot exceed 30
+                                            if (fh + fa) <= 30.0 and fh <= 20.0 and fa <= 20.0:
+                                                if b365_id:
+                                                    fifa_db_results[b365_id] = score_pair
+                                                if m_id:
+                                                    fifa_db_results[m_id] = score_pair
+                                            else:
+                                                logger.warning(f"Rejected non-soccer score for FIFA API match {m_id}/{b365_id}: {fh}-{fa}")
                                     except (ValueError, TypeError):
                                         pass
                 except Exception as api_err:
-                    logger.debug(f"History query note for player {player}: {api_err}")
+                    logger.debug(f"History query note for player {player} ({sport_tag}): {api_err}")
 
-    # 2. Query verified results table in PostgreSQL (core.results ONLY)
+    # 2. Query verified results table in PostgreSQL with sport isolation
     if pending_ids:
         try:
             db_candidates = []
@@ -2195,29 +2215,40 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
 
             if conn:
                 cur = conn.cursor()
-                # Strictly query core.results targeted for pending match IDs
-                # NEVER query core.matches raw_payload for score values!
                 cur.execute("""
                     SELECT r.match_id, 
                            COALESCE(m.raw_payload->>'idMatchBet365', ''),
                            r.final_home_score, 
-                           r.final_away_score 
+                           r.final_away_score,
+                           COALESCE(m.sport, '') as m_sport
                     FROM core.results r
                     LEFT JOIN core.matches m ON r.match_id = m.match_id
                     WHERE (r.match_id = ANY(%s) OR m.raw_payload->>'idMatchBet365' = ANY(%s))
                       AND r.final_home_score IS NOT NULL AND r.final_away_score IS NOT NULL
                     ORDER BY r.id DESC
                 """, (pending_ids, pending_ids))
-                for r_mid, b365_id, h, a in cur.fetchall():
+                for r_mid, b365_id, h, a, m_sport in cur.fetchall():
                     if h is not None and a is not None:
-                        pair = (float(h), float(a))
-                        if r_mid and str(r_mid) not in db_results:
-                            db_results[str(r_mid)] = pair
-                        if b365_id and str(b365_id) not in db_results:
-                            db_results[str(b365_id)] = pair
+                        fh, fa = float(h), float(a)
+                        score_pair = (fh, fa)
+                        sport_str = str(m_sport).lower()
 
-                # Persist any verified finished scores discovered from JarBet API into core.results
-                for v_id, (fh, fa) in db_results.items():
+                        if "ebasket" in sport_str or (fh + fa) >= 45.0:
+                            if (fh + fa) >= 45.0 and fh >= 15.0 and fa >= 15.0:
+                                if r_mid and str(r_mid) not in ebasket_db_results:
+                                    ebasket_db_results[str(r_mid)] = score_pair
+                                if b365_id and str(b365_id) not in ebasket_db_results:
+                                    ebasket_db_results[str(b365_id)] = score_pair
+                        else:
+                            if (fh + fa) <= 30.0 and fh <= 20.0 and fa <= 20.0:
+                                if r_mid and str(r_mid) not in fifa_db_results:
+                                    fifa_db_results[str(r_mid)] = score_pair
+                                if b365_id and str(b365_id) not in fifa_db_results:
+                                    fifa_db_results[str(b365_id)] = score_pair
+
+                # Persist verified finished scores discovered from JarBet API into core.results
+                all_discovered = list(fifa_db_results.items()) + list(ebasket_db_results.items())
+                for v_id, (fh, fa) in all_discovered:
                     try:
                         cur.execute("""
                             INSERT INTO core.results (match_id, final_home_score, final_away_score, settled_at, settlement_source)
@@ -2232,7 +2263,7 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
         except Exception as db_ex:
             logger.debug(f"PostgreSQL core.results query note: {db_ex}")
 
-    # 3. Settle pending tips with elapsed time validation and 100% verified scores
+    # 3. Settle pending tips with elapsed time validation and sport-segregated scores
     keys_to_settle = list(cache.keys())
     for key in keys_to_settle:
         info = cache.get(key)
@@ -2251,8 +2282,7 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
         if "Result:" in msg_text and ("Won" in msg_text or "Lost" in msg_text or "Void" in msg_text):
             continue
 
-        # Elapsed Match Duration Guard: eSoccer takes 12 mins, eBasket takes ~18 mins
-        # A match published less than min_duration ago is STILL ACTIVELY IN PLAY!
+        # Elapsed Match Duration Guard
         pub_time_str = info.get("published_at_utc")
         elapsed_mins = 999.0
         if pub_time_str:
@@ -2262,16 +2292,45 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
             except Exception:
                 elapsed_mins = 999.0
 
-        min_duration = 18.0 if "ebasket" in str(info.get("type", "")).lower() else 13.0
+        t_type = str(info.get("type", "")).lower()
+        is_ebasket = "ebasket" in t_type or info.get("sport") == "ebasket"
+        min_duration = 18.0 if is_ebasket else 13.0
         if elapsed_mins < min_duration:
-            # Match is still actively in-play! Keep pending until game finishes.
             continue
 
         res_status = None
+        score_pair = None
 
-        if m_id in db_results:
-            h_score, a_score = db_results[m_id]
-            t_type = str(info.get("type", "")).lower()
+        # STRICT SPORT ROUTING & SCORE VALIDATION
+        if is_ebasket:
+            if m_id in ebasket_db_results:
+                score_pair = ebasket_db_results[m_id]
+            elif m_id in fifa_db_results:
+                # Flag and suppress cross-sport pollution
+                logger.error(f"BLOCKED cross-sport corruption: eSoccer score {fifa_db_results[m_id]} detected for eBasket tip {m_id} (msg {mid}). Ignoring soccer score!")
+                continue
+        else:
+            if m_id in fifa_db_results:
+                score_pair = fifa_db_results[m_id]
+            elif m_id in ebasket_db_results:
+                logger.error(f"BLOCKED cross-sport corruption: eBasket score {ebasket_db_results[m_id]} detected for FIFA tip {m_id} (msg {mid}). Ignoring basketball score!")
+                continue
+
+        if score_pair is not None:
+            h_score, a_score = score_pair
+
+            # HARD PLAUSIBILITY SAFETY NET
+            if is_ebasket:
+                total_pts = h_score + a_score
+                if total_pts < 45.0 or h_score < 15.0 or a_score < 15.0:
+                    logger.error(f"REJECTED PLAUSIBILITY VIOLATION: eBasket match {m_id} score {h_score}-{a_score} is too low. Tip stays pending!")
+                    continue
+            else:
+                total_goals = h_score + a_score
+                if total_goals > 30.0 or h_score > 20.0 or a_score > 20.0:
+                    logger.error(f"REJECTED PLAUSIBILITY VIOLATION: FIFA match {m_id} score {h_score}-{a_score} is too high. Tip stays pending!")
+                    continue
+
             side = str(info.get("side", "over" if "ou" in t_type else "home")).lower()
             line = float(info.get("line", 2.5 if "ou" in t_type else 0.0))
             res_status = evaluate_match_result(t_type, side, line, h_score, a_score)
@@ -2280,9 +2339,8 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                 ok = update_telegram_tip_result(tok, ch, mid, msg_text, res_status)
                 if ok:
                     status_label = "✅ Won" if res_status == "WIN" else ("❌ Lost" if res_status == "LOSS" else "Void")
-                    logger.info(f"SETTLED TIP: Match {m_id} -> {status_label} (Final Score: {h_score}-{a_score}) (Edited Msg {mid})")
+                    logger.info(f"SETTLED TIP: Match {m_id} ({t_type}) -> {status_label} (Final Score: {h_score}-{a_score}) (Edited Msg {mid})")
 
-                    # Calculate net units for 1.0 unit flat stake
                     odds_num = float(info.get("odds", 1.90))
                     if not odds_num or odds_num <= 1.0:
                         try:
@@ -2299,7 +2357,7 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                         net_u = 0.0
                     elif res_status in ["HALF_LOSS"]:
                         net_u = -0.5
-                    else: # LOSS
+                    else:
                         net_u = -1.0
 
                     now_b = datetime.now(BRT_TZ)
@@ -2324,6 +2382,7 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
 
                     del cache[key]
                     save_published_tips_cache(cache)
+
 
 
 def start_dashboard_server():
