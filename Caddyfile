@@ -1,14 +1,13 @@
-# Global configuration
 {
-    auto_https disable_redirects
+    email admin@mario-ai.internal
 }
 
-# Direct HTTP on port 80 - immediately reachable via http://24.199.87.126
-:80 {
-    reverse_proxy dashboard:8000
-}
-
-# Automated TLS on domain / sslip.io
+# Automated TLS for the configured domain (default: 24.199.87.126.sslip.io)
 {$DASHBOARD_DOMAIN:24.199.87.126.sslip.io} {
     reverse_proxy dashboard:8000
+}
+
+# Redirect bare IP HTTP to the secure HTTPS domain
+http://24.199.87.126 {
+    redir https://{$DASHBOARD_DOMAIN:24.199.87.126.sslip.io}{uri} permanent
 }
