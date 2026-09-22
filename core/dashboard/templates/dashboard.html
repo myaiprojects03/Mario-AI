@@ -59,6 +59,51 @@
         .section-subtitle { font-size: 11px; color: #6b7280; margin-bottom: 16px; line-height: 1.4; }
 
         .table-responsive { overflow-x: auto; }
+        .table-scroll-container {
+            max-height: 520px;
+            overflow-y: auto;
+            overflow-x: auto;
+            border: 1px solid #262b38;
+            border-radius: 8px;
+        }
+        .table-scroll-container::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        .table-scroll-container::-webkit-scrollbar-track {
+            background: #161922;
+        }
+        .table-scroll-container::-webkit-scrollbar-thumb {
+            background: #262b38;
+            border-radius: 4px;
+        }
+        .table-scroll-container::-webkit-scrollbar-thumb:hover {
+            background: #374151;
+        }
+        .table-scroll-container thead th {
+            position: sticky;
+            top: 0;
+            z-index: 5;
+            background: #1f2430;
+            box-shadow: 0 1px 0 #262b38;
+        }
+        .custom-section-select {
+            background: #1f2430;
+            color: #e5e7eb;
+            border: 1px solid #374151;
+            border-radius: 8px;
+            padding: 6px 12px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            outline: none;
+            transition: border-color 0.2s, background 0.2s;
+        }
+        .custom-section-select:hover, .custom-section-select:focus {
+            border-color: #3b82f6;
+            background: #262b38;
+        }
+
         .data-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; }
         .data-table th { background: #1f2430; color: #9ca3af; font-weight: 700; padding: 10px 12px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #262b38; }
         .data-table td { padding: 12px; border-bottom: 1px solid #1f2430; color: #e5e7eb; }
@@ -83,7 +128,7 @@
             <div class="nav-title">MARIO AI • PAINEL DE PERFORMANCE</div>
             <div class="badge-live-prod">PRODUÇÃO OFICIAL (BRT)</div>
         </div>
-        <a href="/logout" class="btn-logout">Sair</a>
+        <a href="/logout" onclick="handleLogout(event)" class="btn-logout">Sair</a>
     </div>
 
     <!-- Filter Controls Bar -->
@@ -316,13 +361,44 @@
 
     <!-- Latest Dispatched Tips Table -->
     <div class="section-box">
-        <div class="section-title">
-            <span id="tips-table-header">ÚLTIMAS TIPS ENVIADAS (HORÁRIO DE BRASÍLIA - BRT)</span>
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 8px;">
+            <div class="section-title" style="margin-bottom: 0;">
+                <span id="tips-table-header">ÚLTIMAS TIPS ENVIADAS (HORÁRIO DE BRASÍLIA - BRT)</span>
+            </div>
+            
+            <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                <!-- Channel / Market Filter Dropdown: Admins do not need to scroll to top to filter -->
+                <div style="display: flex; align-items: center; gap: 6px;">
+                    <label for="tips-market-select" style="font-size: 11px; font-weight: 700; color: #9ca3af; text-transform: uppercase;">Mercado:</label>
+                    <select id="tips-market-select" class="custom-section-select" onchange="onTipsMarketChange(this.value)">
+                        <option value="all" selected>All (Master View)</option>
+                        <option value="fifa_goals_ou">FIFA Goals O/U</option>
+                        <option value="fifa_asian_handicap">FIFA Asian Handicap</option>
+                        <option value="fifa_money_line">FIFA Money Line</option>
+                        <option value="ebasket_money_line">eBasketball Money Line</option>
+                        <option value="ebasket_points_ou">eBasketball Points O/U</option>
+                    </select>
+                </div>
+
+                <!-- Display Limit Dropdown -->
+                <div style="display: flex; align-items: center; gap: 6px;">
+                    <label for="tips-limit-select" style="font-size: 11px; font-weight: 700; color: #9ca3af; text-transform: uppercase;">Exibir:</label>
+                    <select id="tips-limit-select" class="custom-section-select" onchange="onTipsLimitChange(this.value)">
+                        <option value="25">25 tips</option>
+                        <option value="50">50 tips</option>
+                        <option value="100" selected>100 tips</option>
+                        <option value="250">250 tips</option>
+                    </select>
+                </div>
+            </div>
         </div>
-        <div class="section-subtitle" id="tips-table-subtitle">
+
+        <div class="section-subtitle" id="tips-table-subtitle" style="margin-bottom: 14px;">
             Registro das tips publicadas mais recentes com status de liquidação e verificação de links.
         </div>
-        <div class="table-responsive">
+
+        <!-- Scrollable Section Box: Admins can scroll directly inside this section without scrolling down the main page -->
+        <div class="table-scroll-container">
             <table class="data-table">
                 <thead>
                     <tr>
@@ -349,6 +425,60 @@
     </div>
 
     <script>
+        // ==========================================
+        // 1. Tab Isolation & Inactivity Timeout
+        // ==========================================
+        // If opened in a new tab without tab session, redirect to login
+        if (!sessionStorage.getItem('mario_tab_session')) {
+            window.location.replace('/login?reason=new_tab');
+        }
+
+        // Inactivity Timeout: 15 minutes of no activity auto-logs out
+        const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
+        let lastUserActivity = Date.now();
+
+        function recordUserActivity() {
+            lastUserActivity = Date.now();
+        }
+
+        ['mousemove', 'mousedown', 'keydown', 'scroll', 'touchstart', 'click'].forEach(evt => {
+            window.addEventListener(evt, recordUserActivity, { passive: true });
+        });
+
+        setInterval(() => {
+            if (Date.now() - lastUserActivity > INACTIVITY_TIMEOUT_MS) {
+                sessionStorage.removeItem('mario_tab_session');
+                window.location.replace('/logout?reason=inactivity');
+            }
+        }, 10000);
+
+        function handleLogout(e) {
+            if (e) e.preventDefault();
+            sessionStorage.removeItem('mario_tab_session');
+            window.location.href = '/logout';
+        }
+
+        let activeTipsLimit = 100;
+
+        function onTipsMarketChange(val) {
+            activeChannel = val;
+            // Synchronize the top pills
+            document.querySelectorAll('#channel-tabs .filter-pill').forEach(btn => {
+                const onclickAttr = btn.getAttribute('onclick') || '';
+                if (onclickAttr.includes("'" + val + "'")) {
+                    btn.classList.add('active');
+                } else {
+                    btn.classList.remove('active');
+                }
+            });
+            debouncedRefresh();
+        }
+
+        function onTipsLimitChange(val) {
+            activeTipsLimit = parseInt(val, 10) || 100;
+            fetchTipsTable();
+        }
+
         let activeChannel = 'all';
         let activeDateFilter = 'all';
         let chartCumulativeInstance = null;
@@ -708,7 +838,7 @@
 
         async function fetchTipsTable() {
             try {
-                const res = await fetch(`/api/tips?${getQueryString()}&limit=100`);
+                const res = await fetch(`/api/tips?${getQueryString()}&limit=${activeTipsLimit}`);
                 if (!res.ok) return;
                 const data = await res.json();
                 const tbody = document.getElementById('tbody-tips');

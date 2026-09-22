@@ -540,10 +540,18 @@ def compute_dashboard_analytics_and_charts(
 # ============================================================================
 
 @app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request, error: Optional[str] = None):
-    if is_authenticated(request):
+async def login_page(request: Request, error: Optional[str] = None, reason: Optional[str] = None):
+    err_msg = error
+    if reason == "new_tab":
+        err_msg = "Sessão requer autenticação nesta aba. Por favor, faça login."
+    elif reason == "inactivity":
+        err_msg = "Sessão encerrada por inatividade (15 min). Por favor, faça login novamente."
+
+    # If reason is set, do NOT auto-redirect to / (forces this tab to authenticate)
+    if not reason and is_authenticated(request):
         return RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
-    return templates.TemplateResponse(request=request, name="login.html", context={"error": error})
+
+    return templates.TemplateResponse(request=request, name="login.html", context={"error": err_msg})
 
 
 @app.post("/login")
@@ -570,8 +578,11 @@ async def login_submit(request: Request, username: str = Form(...), password: st
 
 
 @app.get("/logout")
-async def logout():
-    response = RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
+async def logout(reason: Optional[str] = None):
+    url = "/login"
+    if reason:
+        url = f"/login?reason={reason}"
+    response = RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
     response.delete_cookie("admin_session")
     return response
 

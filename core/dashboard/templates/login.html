@@ -32,7 +32,7 @@
         {% if error %}
         <div class="error-msg">{{ error }}</div>
         {% endif %}
-        <form action="/login" method="POST">
+        <form action="/login" method="POST" onsubmit="sessionStorage.setItem('mario_tab_session', 'active_' + Date.now())">
             <div class="form-group">
                 <label for="username">Username</label>
                 <input type="text" id="username" name="username" placeholder="Username" required autocomplete="off">
