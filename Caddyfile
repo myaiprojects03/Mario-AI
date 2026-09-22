@@ -5,10 +5,10 @@
 
 # Direct HTTP on port 80 - immediately reachable via http://24.199.87.126
 :80 {
-    reverse_proxy app:8000
+    reverse_proxy dashboard:8000
 }
 
 # Automated TLS on domain / sslip.io
 {$DASHBOARD_DOMAIN:24.199.87.126.sslip.io} {
-    reverse_proxy app:8000
+    reverse_proxy dashboard:8000
 }

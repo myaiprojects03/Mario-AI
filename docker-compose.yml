@@ -12,10 +12,27 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
-  app:
+  publisher:
     image: marioaicode-app:latest
     build: .
     container_name: mario_ai_live_publisher
+    restart: always
+    depends_on:
+      - db
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgrespassword@db:5432/mario_ai
+      - MODEL_DIR=production_models
+      - RUN_EMBEDDED_DASHBOARD=false
+    volumes:
+      - ./core/dashboard:/app/core/dashboard
+    command: ["python", "-m", "core.live_publisher"]
+
+  dashboard:
+    image: marioaicode-app:latest
+    build: .
+    container_name: mario_ai_dashboard
     restart: always
     depends_on:
       - db
@@ -25,16 +42,16 @@ services:
       - .env
     environment:
       - DATABASE_URL=postgresql://postgres:postgrespassword@db:5432/mario_ai
-      - MODEL_DIR=production_models
     volumes:
       - ./core/dashboard:/app/core/dashboard
+    command: ["uvicorn", "core.dashboard.dashboard_app:app", "--host", "0.0.0.0", "--port", "8000"]
 
   caddy:
     image: caddy:alpine
     container_name: mario_ai_caddy
     restart: always
     depends_on:
-      - app
+      - dashboard
     ports:
       - "80:80"
       - "443:443"

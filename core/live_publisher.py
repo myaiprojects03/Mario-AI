@@ -2398,10 +2398,13 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     logger.info("Starting live publisher standalone service...")
 
-    import threading
-    dash_thread = threading.Thread(target=start_dashboard_server, daemon=True)
-    dash_thread.start()
-    logger.info("Admin Dashboard server background thread started on port 8000.")
+    if os.getenv("RUN_EMBEDDED_DASHBOARD", "false").lower() == "true":
+        import threading
+        dash_thread = threading.Thread(target=start_dashboard_server, daemon=True)
+        dash_thread.start()
+        logger.info("Admin Dashboard server background thread started on port 8000.")
+    else:
+        logger.info("Standalone dashboard mode: Live publisher pipeline running independently.")
 
     while True:
         try:
