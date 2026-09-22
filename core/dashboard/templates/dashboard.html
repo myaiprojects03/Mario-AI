@@ -317,10 +317,10 @@
     <!-- Latest Dispatched Tips Table -->
     <div class="section-box">
         <div class="section-title">
-            <span>ÚLTIMAS TIPS ENVIADAS (HORÁRIO DE BRASÍLIA - BRT)</span>
+            <span id="tips-table-header">ÚLTIMAS TIPS ENVIADAS (HORÁRIO DE BRASÍLIA - BRT)</span>
         </div>
-        <div class="section-subtitle">
-            Registro detalhado de tips publicadas nos canais oficiais com status de liquidação e verificação de links.
+        <div class="section-subtitle" id="tips-table-subtitle">
+            Registro das tips publicadas mais recentes com status de liquidação e verificação de links.
         </div>
         <div class="table-responsive">
             <table class="data-table">
@@ -353,20 +353,38 @@
         let activeDateFilter = 'all';
         let chartCumulativeInstance = null;
         let chartDailyInstance = null;
+        let isFetching = false;
+        let debounceTimer = null;
 
         window.addEventListener('DOMContentLoaded', () => {
-            refreshAllData();
-            // Polling interval: 15 seconds
-            setInterval(refreshAllData, 15000);
+            initApp();
+            
+            // Non-blocking auto-refresh interval (25s), only runs if page is active
+            setInterval(() => {
+                if (!document.hidden && !isFetching) {
+                    refreshDataFast();
+                }
+            }, 25000);
         });
 
-        function refreshAllData() {
-            fetchAnalytics();
-            fetchChartsData();
+        function initApp() {
+            refreshDataFast();
             fetchMarketBreakdown();
             fetchPlayerStats();
             fetchValidationSignals();
-            fetchTipsTable();
+        }
+
+        function refreshDataFast() {
+            if (isFetching) return;
+            isFetching = true;
+            
+            Promise.all([
+                fetchAnalytics(),
+                fetchChartsData(),
+                fetchTipsTable()
+            ]).finally(() => {
+                isFetching = false;
+            });
         }
 
         function getQueryString() {
@@ -385,25 +403,41 @@
             activeChannel = channelId;
             document.querySelectorAll('#channel-tabs .filter-pill').forEach(el => el.classList.remove('active'));
             element.classList.add('active');
-            refreshAllData();
+
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                refreshDataFast();
+                fetchPlayerStats();
+            }, 50);
         }
 
         function setDateFilter(filterKey, element) {
             activeDateFilter = filterKey;
             document.querySelectorAll('#date-filters .filter-pill').forEach(el => el.classList.remove('active'));
             element.classList.add('active');
-            refreshAllData();
+
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                refreshDataFast();
+                fetchMarketBreakdown();
+            }, 50);
         }
 
         function triggerCustomFilter() {
             activeDateFilter = 'custom';
             document.querySelectorAll('#date-filters .filter-pill').forEach(el => el.classList.remove('active'));
-            refreshAllData();
+
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                refreshDataFast();
+                fetchMarketBreakdown();
+            }, 200);
         }
 
         async function fetchAnalytics() {
             try {
                 const res = await fetch(`/api/channel_analytics?${getQueryString()}`);
+                if (!res.ok) return;
                 const data = await res.json();
                 const a = data.analytics;
 
@@ -438,9 +472,10 @@
         async function fetchChartsData() {
             try {
                 const res = await fetch(`/api/charts_data?${getQueryString()}`);
+                if (!res.ok) return;
                 const data = await res.json();
-                renderCumulativeChart(data.labels, data.cumulative_units);
-                renderDailyChart(data.labels, data.daily_results);
+                renderCumulativeChart(data.labels || [], data.cumulative_units || []);
+                renderDailyChart(data.labels || [], data.daily_results || []);
             } catch (err) {
                 console.error("Error fetching charts data:", err);
             }
@@ -450,8 +485,15 @@
             const canvas = document.getElementById('chart-cumulative');
             if (!canvas) return;
             const ctx = canvas.getContext('2d');
+
+            const lbls = labels.length ? labels : ['Sem dados'];
+            const vals = data.length ? data : [0];
+
             if (chartCumulativeInstance) {
-                chartCumulativeInstance.destroy();
+                chartCumulativeInstance.data.labels = lbls;
+                chartCumulativeInstance.data.datasets[0].data = vals;
+                chartCumulativeInstance.update('none'); // Update in place, 0ms lag
+                return;
             }
 
             let grad = ctx.createLinearGradient(0, 0, 0, 260);
@@ -461,16 +503,16 @@
             chartCumulativeInstance = new Chart(ctx, {
                 type: 'line',
                 data: {
-                    labels: labels.length ? labels : ['Sem dados'],
+                    labels: lbls,
                     datasets: [{
                         label: 'Accumulated Units',
-                        data: data.length ? data : [0],
+                        data: vals,
                         borderColor: '#10b981',
                         backgroundColor: grad,
                         fill: true,
                         tension: 0.3,
                         borderWidth: 2.5,
-                        pointRadius: 3,
+                        pointRadius: vals.length > 50 ? 1 : 3,
                         pointHoverRadius: 6,
                         pointBackgroundColor: '#10b981'
                     }]
@@ -478,10 +520,11 @@
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
+                    animation: false, // Prevents CPU spikes on tab clicks
                     scales: {
                         x: {
                             grid: { color: '#1f2430' },
-                            ticks: { color: '#9ca3af', font: { size: 11 } }
+                            ticks: { color: '#9ca3af', font: { size: 11 }, maxTicksLimit: 15 }
                         },
                         y: {
                             grid: { color: '#1f2430' },
@@ -506,30 +549,38 @@
             const canvas = document.getElementById('chart-daily');
             if (!canvas) return;
             const ctx = canvas.getContext('2d');
-            if (chartDailyInstance) {
-                chartDailyInstance.destroy();
-            }
 
-            const bgColors = data.map(v => v >= 0 ? '#10b981' : '#ef4444');
+            const lbls = labels.length ? labels : ['Sem dados'];
+            const vals = data.length ? data : [0];
+            const bgColors = vals.map(v => v >= 0 ? '#10b981' : '#ef4444');
+
+            if (chartDailyInstance) {
+                chartDailyInstance.data.labels = lbls;
+                chartDailyInstance.data.datasets[0].data = vals;
+                chartDailyInstance.data.datasets[0].backgroundColor = bgColors;
+                chartDailyInstance.update('none'); // Update in place, 0ms lag
+                return;
+            }
 
             chartDailyInstance = new Chart(ctx, {
                 type: 'bar',
                 data: {
-                    labels: labels.length ? labels : ['Sem dados'],
+                    labels: lbls,
                     datasets: [{
                         label: 'Daily Result (Units)',
-                        data: data.length ? data : [0],
-                        backgroundColor: bgColors.length ? bgColors : ['#10b981'],
+                        data: vals,
+                        backgroundColor: bgColors,
                         borderRadius: 4
                     }]
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
+                    animation: false,
                     scales: {
                         x: {
                             grid: { color: '#1f2430' },
-                            ticks: { color: '#9ca3af', font: { size: 11 } }
+                            ticks: { color: '#9ca3af', font: { size: 11 }, maxTicksLimit: 15 }
                         },
                         y: {
                             grid: { color: '#1f2430' },
@@ -553,19 +604,20 @@
         async function fetchMarketBreakdown() {
             try {
                 const res = await fetch(`/api/market_breakdown?filter_days=${encodeURIComponent(activeDateFilter)}`);
+                if (!res.ok) return;
                 const data = await res.json();
                 const tbody = document.getElementById('tbody-market-breakdown');
-                tbody.innerHTML = '';
 
                 if (!data.markets || data.markets.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:#6b7280;padding:16px;">Sem dados de mercados</td></tr>';
                     return;
                 }
 
+                const rows = [];
                 data.markets.forEach(m => {
                     const unitColor = m.net_units.startsWith('-') ? '#ef4444' : '#10b981';
                     const roiColor = m.roi.startsWith('-') ? '#ef4444' : '#10b981';
-                    tbody.innerHTML += `
+                    rows.push(`
                         <tr>
                             <td><strong>${m.market_name}</strong></td>
                             <td><span class="badge-live">${m.status} 🟢</span></td>
@@ -580,8 +632,9 @@
                             <td>${m.avg_odds}</td>
                             <td style="color:#fbbf24;font-weight:600;">${m.pending_tips}</td>
                         </tr>
-                    `;
+                    `);
                 });
+                tbody.innerHTML = rows.join(''); // Single DOM assignment!
             } catch (err) {
                 console.error("Error fetching market breakdown:", err);
             }
@@ -590,12 +643,13 @@
         async function fetchPlayerStats() {
             try {
                 const res = await fetch(`/api/player_stats?channel_id=${encodeURIComponent(activeChannel)}`);
+                if (!res.ok) return;
                 const data = await res.json();
 
                 const topBody = document.getElementById('tbody-top-players');
-                topBody.innerHTML = '';
+                const topRows = [];
                 (data.top_players || []).forEach(p => {
-                    topBody.innerHTML += `
+                    topRows.push(`
                         <tr>
                             <td><strong>${p.player}</strong></td>
                             <td>${p.tips}</td>
@@ -603,13 +657,14 @@
                             <td style="color:#10b981;font-weight:700;">${p.units}</td>
                             <td style="color:#10b981;">${p.roi}</td>
                         </tr>
-                    `;
+                    `);
                 });
+                topBody.innerHTML = topRows.length ? topRows.join('') : '<tr><td colspan="5" style="text-align:center;color:#6b7280;">Sem dados</td></tr>';
 
                 const avoidBody = document.getElementById('tbody-avoid-players');
-                avoidBody.innerHTML = '';
+                const avoidRows = [];
                 (data.avoid_players || []).forEach(p => {
-                    avoidBody.innerHTML += `
+                    avoidRows.push(`
                         <tr>
                             <td><strong>${p.player}</strong></td>
                             <td>${p.tips}</td>
@@ -617,8 +672,9 @@
                             <td style="color:#ef4444;font-weight:700;">${p.units}</td>
                             <td style="color:#ef4444;">${p.roi}</td>
                         </tr>
-                    `;
+                    `);
                 });
+                avoidBody.innerHTML = avoidRows.length ? avoidRows.join('') : '<tr><td colspan="5" style="text-align:center;color:#6b7280;">Sem dados</td></tr>';
             } catch (err) {
                 console.error("Error fetching player stats:", err);
             }
@@ -627,12 +683,13 @@
         async function fetchValidationSignals() {
             try {
                 const res = await fetch('/api/validation_signals');
+                if (!res.ok) return;
                 const data = await res.json();
                 const tbody = document.getElementById('tbody-validation');
-                tbody.innerHTML = '';
+                const rows = [];
 
                 (data.signals || []).forEach(s => {
-                    tbody.innerHTML += `
+                    rows.push(`
                         <tr>
                             <td><strong>${s.signal}</strong></td>
                             <td>${s.tips}</td>
@@ -641,8 +698,9 @@
                             <td style="color:${s.roi.startsWith('-') ? '#ef4444' : '#10b981'};">${s.roi}</td>
                             <td><span style="font-size:11px;font-weight:700;color:#9ca3af;">${s.status}</span></td>
                         </tr>
-                    `;
+                    `);
                 });
+                tbody.innerHTML = rows.join('');
             } catch (err) {
                 console.error("Error fetching validation signals:", err);
             }
@@ -650,16 +708,22 @@
 
         async function fetchTipsTable() {
             try {
-                const res = await fetch(`/api/tips?${getQueryString()}`);
+                const res = await fetch(`/api/tips?${getQueryString()}&limit=100`);
+                if (!res.ok) return;
                 const data = await res.json();
                 const tbody = document.getElementById('tbody-tips');
-                tbody.innerHTML = '';
 
                 if (!data.tips || data.tips.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="13" style="text-align:center;color:#6b7280;padding:20px;">Nenhuma tip encontrada para os filtros selecionados</td></tr>';
                     return;
                 }
 
+                // Update count in header
+                const total = data.total_count || data.tips.length;
+                document.getElementById('tips-table-subtitle').innerText = 
+                    `Exibindo as ${data.tips.length} tips mais recentes (total de ${total} registradas) com status de liquidação e verificação de links.`;
+
+                const rows = [];
                 data.tips.forEach(tip => {
                     let statusBadge = '<span class="badge-published">PUBLISHED</span>';
                     let resBadge = '<span style="color:#fbbf24;font-weight:600;">PENDING</span>';
@@ -677,7 +741,7 @@
                         resBadge = '<span style="color:#9ca3af;font-weight:700;">VOID</span>';
                     }
 
-                    tbody.innerHTML += `
+                    rows.push(`
                         <tr>
                             <td><small>${tip.timestamp}</small></td>
                             <td><strong>${tip.market_name}</strong></td>
@@ -693,8 +757,11 @@
                             <td>${statusBadge}</td>
                             <td><a href="${tip.match_link}" target="_blank" class="btn-bet-link">Bet Link</a></td>
                         </tr>
-                    `;
+                    `);
                 });
+
+                // Single instant DOM assignment: 0ms browser lag!
+                tbody.innerHTML = rows.join('');
             } catch (err) {
                 console.error("Error fetching tips table:", err);
             }

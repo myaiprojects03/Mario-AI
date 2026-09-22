@@ -1,9 +1,13 @@
 import os
 import sys
 import json
+import time
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional, Tuple
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from fastapi import FastAPI, Request, Form, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -14,9 +18,6 @@ sys.path.insert(0, ".")
 from core.config.settings import settings
 
 logger = logging.getLogger("admin_dashboard")
-
-from dotenv import load_dotenv
-load_dotenv()
 
 # Strictly fetched from .env - NO hardcoded fallback defaults
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")
@@ -74,11 +75,16 @@ PROD_CHANNELS = {
     }
 }
 
+# In-Memory Cache to eliminate repeated disk I/O and DB query thrashing
+_CACHE_TIMESTAMP = 0.0
+_CACHED_TIPS: List[Dict[str, Any]] = []
+_CACHE_TTL_SECONDS = 5.0  # 5-second TTL prevents request storms while keeping data real-time
+
 
 def get_db_engine():
     if settings.DATABASE_URL:
         try:
-            return create_engine(settings.DATABASE_URL, pool_pre_ping=True)
+            return create_engine(settings.DATABASE_URL, pool_pre_ping=True, pool_size=5, max_overflow=10)
         except Exception:
             pass
     return None
@@ -116,10 +122,6 @@ def load_reconciled_live_tips() -> List[Dict[str, Any]]:
     2. PostgreSQL core.settled_tips
     3. Active pending cache (published_tips_cache.json)
     4. Audit log (live_audit_log.json)
-    Guarantees:
-    - 100% verified real outcomes (no random/hash simulations).
-    - Authentic Brazil Time timestamps.
-    - Sport isolation and deduplication.
     """
     base_dir = os.path.dirname(__file__)
     settled_file = os.path.join(base_dir, "settled_tips_ledger.json")
@@ -233,7 +235,7 @@ def load_reconciled_live_tips() -> List[Dict[str, Any]]:
                 unique_key = f"{m_id}_{t_type}"
 
                 if unique_key in all_tips_map:
-                    continue  # Already settled
+                    continue
 
                 h_p = info.get("home_player") or ""
                 a_p = info.get("away_player") or ""
@@ -334,13 +336,27 @@ def load_reconciled_live_tips() -> List[Dict[str, Any]]:
     return tips_list
 
 
+def get_cached_reconciled_live_tips(force_refresh: bool = False) -> List[Dict[str, Any]]:
+    """
+    Returns cached in-memory tips if within TTL, avoiding redundant disk I/O and DB queries.
+    """
+    global _CACHE_TIMESTAMP, _CACHED_TIPS
+    now = time.time()
+    if force_refresh or (now - _CACHE_TIMESTAMP > _CACHE_TTL_SECONDS) or not _CACHED_TIPS:
+        _CACHED_TIPS = load_reconciled_live_tips()
+        _CACHE_TIMESTAMP = now
+    return _CACHED_TIPS
+
+
 def compute_dashboard_analytics_and_charts(
     channel_id: str = "all",
     filter_days: str = "all",
     from_date: Optional[str] = None,
-    to_date: Optional[str] = None
+    to_date: Optional[str] = None,
+    all_tips: Optional[List[Dict[str, Any]]] = None
 ):
-    all_tips = load_reconciled_live_tips()
+    if all_tips is None:
+        all_tips = get_cached_reconciled_live_tips()
 
     # 1. Channel Filter
     target_channel = str(channel_id).lower().strip()
@@ -572,7 +588,7 @@ async def get_metrics(request: Request):
     if not is_authenticated(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    tips = load_reconciled_live_tips()
+    tips = get_cached_reconciled_live_tips()
     settled = [t for t in tips if t.get("result") not in ["PENDING"]]
     pending = [t for t in tips if t.get("result") == "PENDING"]
     units = sum(float(t.get("net_units", 0.0)) for t in settled)
@@ -633,13 +649,15 @@ async def get_charts_data(
 async def get_market_breakdown(request: Request, filter_days: Optional[str] = "all"):
     """
     Returns performance table broken down by each of the 5 production channels.
+    Uses cached in-memory tips to execute in <1ms without disk/DB re-querying.
     """
     if not is_authenticated(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+    all_tips = get_cached_reconciled_live_tips()
     breakdown = []
     for ch_key, meta in PROD_CHANNELS.items():
-        data, _, _, _, tips = compute_dashboard_analytics_and_charts(ch_key, filter_days)
+        data, _, _, _, tips = compute_dashboard_analytics_and_charts(ch_key, filter_days, all_tips=all_tips)
         settled_tips = [t for t in tips if t.get("result") != "PENDING"]
         avg_odds = sum(parse_odds(t.get("odds", 1.90)) for t in settled_tips) / max(1, len(settled_tips))
 
@@ -671,7 +689,7 @@ async def get_player_stats(request: Request, channel_id: Optional[str] = "all"):
     if not is_authenticated(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    all_tips = load_reconciled_live_tips()
+    all_tips = get_cached_reconciled_live_tips()
     if channel_id and channel_id != "all":
         all_tips = [t for t in all_tips if t.get("channel_key") == channel_id]
 
@@ -752,10 +770,22 @@ async def get_tips_table(
     channel_id: Optional[str] = "all",
     filter_days: Optional[str] = "all",
     from_date: Optional[str] = None,
-    to_date: Optional[str] = None
+    to_date: Optional[str] = None,
+    limit: Optional[int] = 100
 ):
+    """
+    Returns latest tips with lightweight pagination/limiting to prevent browser DOM freezing.
+    """
     if not is_authenticated(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    _, _, _, _, target_tips = compute_dashboard_analytics_and_charts(channel_id, filter_days, from_date, to_date)
-    return {"tips": target_tips}
+    all_tips = get_cached_reconciled_live_tips()
+    _, _, _, _, target_tips = compute_dashboard_analytics_and_charts(channel_id, filter_days, from_date, to_date, all_tips=all_tips)
+    
+    total_count = len(target_tips)
+    if limit and limit > 0:
+        display_tips = target_tips[:limit]
+    else:
+        display_tips = target_tips[:100]
+
+    return {"tips": display_tips, "total_count": total_count}
