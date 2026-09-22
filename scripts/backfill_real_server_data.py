@@ -203,9 +203,10 @@ def main():
         print("  -> No match records found for this month.")
         return
 
-    # Backfill records across all 5 channels
+    # Backfill records across all 5 channels with strict daily caps
     settled_records = []
     daily_records = []
+    daily_ch_counts = {}
 
     print("[3/4] Processing and calculating authentic settlement outcomes...")
     for row in matches:
@@ -260,6 +261,14 @@ def main():
                 pick = f"{home_t} (Resultado Final)"
             else:
                 continue
+
+            ch_cap = CHANNEL_MAP.get(ch, {}).get("cap", 150)
+            if date_brt_str not in daily_ch_counts:
+                daily_ch_counts[date_brt_str] = {}
+            current_c = daily_ch_counts[date_brt_str].get(ch, 0)
+            if current_c >= ch_cap:
+                continue
+            daily_ch_counts[date_brt_str][ch] = current_c + 1
 
             outcome, net_u = calculate_outcome(ch, side, line, odds, float(h_sc), float(a_sc))
             score_str = f"{int(h_sc)}-{int(a_sc)}" if (h_sc.is_integer() and a_sc.is_integer()) else f"{h_sc}-{a_sc}"

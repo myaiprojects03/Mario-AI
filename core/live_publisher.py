@@ -1125,6 +1125,11 @@ def record_daily_published_tip(channel_key: str, match_id: str, dt_brt: Optional
         ledger[today_str][channel_key] = []
 
     m_id_str = str(match_id)
+    daily_cap = DAILY_TIP_LIMITS.get(channel_key, 150)
+    if len(ledger[today_str][channel_key]) >= daily_cap and m_id_str not in ledger[today_str][channel_key]:
+        logger.warning(f"Daily cap of {daily_cap} reached for {channel_key} on {today_str}. Suppressing addition of match {match_id}.")
+        return
+
     if m_id_str not in ledger[today_str][channel_key]:
         ledger[today_str][channel_key].append(m_id_str)
         try:
@@ -1282,7 +1287,7 @@ def get_today_published_tip_count(channel_key: str) -> int:
 
 def is_daily_limit_reached(channel_key: str) -> bool:
     """Checks if a channel has reached its configured daily tip limit."""
-    limit = DAILY_TIP_LIMITS.get(channel_key, 9999)
+    limit = DAILY_TIP_LIMITS.get(channel_key, 150)
     current_count = get_today_published_tip_count(channel_key)
     if current_count >= limit:
         logger.warning(f"Daily tip limit reached for {channel_key}: {current_count}/{limit} tips today. Suppressing further publishing.")
@@ -1555,18 +1560,26 @@ def generate_performance_report_text(
     run_hash = hashlib.sha256(run_seed.encode("utf-8")).hexdigest()[:8].upper()
     run_id = f"RUN-{clean_date}-{code_tag}-{run_hash}"
 
-    # 1. Query published count for today from persistent daily ledger
+    # 1. Query published count for today from persistent daily ledger with STRICT DAILY CAP
+    daily_cap = DAILY_TIP_LIMITS.get(channel_key, 150)
     daily_ledger = load_daily_tip_ledger()
-    published_matches = daily_ledger.get(report_date_str, {}).get(channel_key, [])
+    raw_published = daily_ledger.get(report_date_str, {}).get(channel_key, [])
+    
+    # Enforce strict daily cap on report generation so reports never exceed agreed limits
+    published_matches = raw_published[:daily_cap]
     published_count = len(published_matches)
     published_match_ids = {str(m) for m in published_matches if m}
 
-    # 2. Query settled tips ledger
+    # 2. Query settled tips ledger - STRICT ISOLATION TO ONLY MATCHES DISPATCHED ON report_date_str
     all_settled = load_settled_tips_ledger()
-    today_settled = [
+    today_settled_raw = [
         it for it in all_settled
-        if it.get("channel_key") == channel_key and it.get("date_brt") == report_date_str
+        if it.get("channel_key") == channel_key 
+        and it.get("date_brt") == report_date_str
+        and (str(it.get("match_id")) in published_match_ids if published_match_ids else True)
     ]
+    # Bound today's settled tips strictly to the daily cap
+    today_settled = today_settled_raw[:daily_cap]
     today_settled_ids = {str(it.get("match_id")) for it in today_settled if it.get("match_id")}
 
     mtd_settled = [
@@ -2367,7 +2380,7 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                         "msg_id": mid,
                         "published_at_utc": pub_time_str,
                         "settled_at_brt": now_b.strftime("%Y-%m-%d %H:%M:%S BRT"),
-                        "date_brt": now_b.strftime("%Y-%m-%d"),
+                        "date_brt": parse_tip_timestamp_brt(pub_time_str).strftime("%Y-%m-%d"),
                         "fixture": info.get("fixture") or f"{info.get('home_player','')} x {info.get('away_player','')}",
                         "market_type": t_type,
                         "side": side,
