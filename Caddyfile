@@ -1,13 +1,9 @@
-{
-    email admin@mario-ai.internal
-}
-
-# Automated TLS for the configured domain (default: 24.199.87.126.sslip.io)
-{$DASHBOARD_DOMAIN:24.199.87.126.sslip.io} {
+# Automated TLS for both sslip.io and nip.io
+24.199.87.126.sslip.io, 24.199.87.126.nip.io {
     reverse_proxy dashboard:8000
 }
 
 # Redirect bare IP HTTP to the secure HTTPS domain
 http://24.199.87.126 {
-    redir https://{$DASHBOARD_DOMAIN:24.199.87.126.sslip.io}{uri} permanent
+    redir https://24.199.87.126.sslip.io{uri} permanent
 }
