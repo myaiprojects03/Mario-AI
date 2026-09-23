@@ -1263,7 +1263,8 @@ def get_today_published_tip_count(channel_key: str) -> int:
         except Exception:
             pass
 
-    # Auto-sync newly discovered historical matches to permanent daily ledger so it stays permanently locked
+    # Auto-sync newly discovered historical matches to permanent daily ledger with STRICT DAILY CAP enforcement
+    daily_cap = DAILY_TIP_LIMITS.get(channel_key, 150)
     if seen_matches:
         try:
             ledger = load_daily_tip_ledger()
@@ -1273,6 +1274,8 @@ def get_today_published_tip_count(channel_key: str) -> int:
                 ledger[today_str][channel_key] = []
             updated = False
             for m_id in seen_matches:
+                if len(ledger[today_str][channel_key]) >= daily_cap:
+                    break
                 if m_id not in ledger[today_str][channel_key]:
                     ledger[today_str][channel_key].append(m_id)
                     updated = True
@@ -1283,7 +1286,7 @@ def get_today_published_tip_count(channel_key: str) -> int:
         except Exception:
             pass
 
-    return len(seen_matches)
+    return min(len(seen_matches), daily_cap)
 
 def is_daily_limit_reached(channel_key: str) -> bool:
     """Checks if a channel has reached its configured daily tip limit."""
@@ -1587,7 +1590,7 @@ def generate_performance_report_text(
         if it.get("channel_key") == channel_key and str(it.get("date_brt", "")).startswith(current_month_str)
     ]
 
-    # 3. Active / Pending Fixtures Count (STRICTLY SCOPED - CANNOT EXCEED PUBLISHED COUNT)
+    # 3. Active / Pending Fixtures Count (STRICTLY SCOPED & CLAMPED TO DAILY CAP)
     if published_count > 0:
         settled_from_published = len(published_match_ids.intersection(today_settled_ids))
         if settled_from_published > 0:
@@ -1604,6 +1607,9 @@ def generate_performance_report_text(
             and str(v.get("published_at_utc", ""))[:10] == report_date_str
         )
 
+    # Strictly clamp pending count so settled + pending can NEVER exceed daily_cap
+    max_allowed_pending = max(0, daily_cap - len(today_settled))
+    pending_count = min(pending_count, max_allowed_pending)
     pending_exposure = float(pending_count) * 1.0
 
     # 4. Status determination
