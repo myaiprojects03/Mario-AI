@@ -69,8 +69,7 @@ CHANNEL_MAP = {
     "fifa_asian_handicap": os.getenv("TELEGRAM_CHANNEL_FIFA_AH", ""),
     "fifa_money_line": os.getenv("TELEGRAM_CHANNEL_FIFA_ML", ""),
     "ebasket_money_line": os.getenv("TELEGRAM_CHANNEL_EBASKET_ML", ""),
-    "ebasket_ou": os.getenv("TELEGRAM_CHANNEL_EBASKET_OU") or os.getenv("TELEGRAM_CHANNEL_EBASKET_POINTS", ""),
-    "ebasket_points": os.getenv("TELEGRAM_CHANNEL_EBASKET_POINTS") or os.getenv("TELEGRAM_CHANNEL_EBASKET_OU", ""),
+    "ebasket_ou": os.getenv("TELEGRAM_CHANNEL_EBASKET_OU") or os.getenv("TELEGRAM_CHANNEL_EBASKET_POINTS", ""), # ebasket_points is an alias
 }
 
 PRIMARY_MINS_MIN = float(os.getenv("PRIMARY_KICKOFF_MINS_MIN", "1.0"))
@@ -1819,7 +1818,7 @@ def check_and_dispatch_scheduled_reports(bot_token: str):
                     is_midnight=False, target_date_str=today_str, channel_key=m_key, return_meta=True
                 )
                 tok = BOT_TOKENS.get(m_key, bot_token)
-                msg_id = send_telegram_tip(tok, ch_id, text, m_key)
+                msg_id = send_telegram_tip(tok, ch_id, text, channel_key=None) # Reports must never be blocked by daily tip caps
 
                 dispatches = cache.setdefault("dispatches", [])
                 dispatches.append({
@@ -1848,7 +1847,7 @@ def check_and_dispatch_scheduled_reports(bot_token: str):
                     is_midnight=True, target_date_str=completed_day_str, channel_key=m_key, return_meta=True
                 )
                 tok = BOT_TOKENS.get(m_key, bot_token)
-                msg_id = send_telegram_tip(tok, ch_id, text, m_key)
+                msg_id = send_telegram_tip(tok, ch_id, text, channel_key=None) # Reports must never be blocked by daily tip caps
 
                 dispatches = cache.setdefault("dispatches", [])
                 dispatches.append({
