@@ -1171,18 +1171,15 @@ def parse_tip_timestamp_brt(raw_ts: Any) -> datetime:
         return now_brt
 
 
-def get_today_published_tip_count(channel_key: str) -> int:
+def get_today_published_tip_count(channel_key: str, dt_brt=None) -> int:
     """
-    Calculates total tips published for a specific channel on today's BRT date.
-    Pulls from:
-    1. Permanent daily tip ledger (daily_tip_ledger.json) - NEVER drained on settlement!
-    2. Permanent settled tips ledger (settled_tips_ledger.json)
-    3. Active cache (published_tips_cache.json)
-    4. Historical audit log (live_audit_log.json)
+    Returns the exact count of tips ACTUALLY delivered today for this channel.
+    Only counts authentic tips (settled today + genuinely in-play pending).
+    Zero phantom entries, zero auto-sync pollution from historical backfills.
     """
-    now_brt = datetime.now(BRT_TZ)
-    today_str = now_brt.strftime("%Y-%m-%d")
-    target_channel_id = str(CHANNEL_MAP.get(channel_key, "")).strip()
+    if not dt_brt:
+        dt_brt = datetime.now(BRT_TZ)
+    today_str = dt_brt.strftime("%Y-%m-%d")
 
     # Normalize channel aliases
     equivalent_keys = {channel_key}
@@ -1197,95 +1194,37 @@ def get_today_published_tip_count(channel_key: str) -> int:
     elif channel_key in ["fifa_money_line", "fifa_ml"]:
         equivalent_keys.update(["fifa_money_line", "fifa_ml"])
 
-    seen_matches = set()
+    # 1. Real settled tips published today
+    all_settled = load_settled_tips_ledger()
+    today_settled = [
+        it for it in all_settled
+        if it.get("channel_key") in equivalent_keys and str(it.get("date_brt", "")).startswith(today_str)
+    ]
+    today_settled_ids = {str(it.get("match_id")) for it in today_settled if it.get("match_id")}
 
-    # 1. Primary Source: Permanent daily tip ledger
-    ledger = load_daily_tip_ledger()
-    today_ledger = ledger.get(today_str, {})
-    for k in equivalent_keys:
-        for m_id in today_ledger.get(k, []):
-            seen_matches.add(str(m_id))
-
-    # 2. Secondary Source: Permanent settled tips ledger
-    settled_records = load_settled_tips_ledger()
-    for it in settled_records:
-        if str(it.get("date_brt", "")).startswith(today_str):
-            ch_k = str(it.get("channel_key", ""))
-            if ch_k in equivalent_keys:
-                m_id = str(it.get("match_id", ""))
-                if m_id:
-                    seen_matches.add(m_id)
-
-    # 3. Tertiary Source: Active published tips cache
+    # 2. Genuine in-play pending tips published today (must have msg_id and be < 4 hours old)
     cache = load_published_tips_cache()
+    now_utc = datetime.now(timezone.utc)
+    pending_ids = set()
     if isinstance(cache, dict):
         for key, item in cache.items():
             if not isinstance(item, dict):
                 continue
             item_type = str(item.get("type", "")).lower()
-            item_ch = str(item.get("channel_id") or item.get("channel", "")).strip()
+            if item_type in equivalent_keys:
+                m_id = str(item.get("match_id") or key)
+                if m_id not in today_settled_ids:
+                    raw_ts = item.get("published_at_utc") or item.get("timestamp")
+                    dt_tip_brt = parse_tip_timestamp_brt(raw_ts)
+                    if dt_tip_brt and dt_tip_brt.strftime("%Y-%m-%d") == today_str:
+                        dt_tip_utc = dt_tip_brt.astimezone(timezone.utc)
+                        if (now_utc - dt_tip_utc).total_seconds() <= 4 * 3600:
+                            pending_ids.add(m_id)
 
-            if item_type in equivalent_keys or (target_channel_id and target_channel_id == item_ch):
-                raw_ts = item.get("published_at_utc") or item.get("timestamp") or item.get("created_at")
-                dt_brt = parse_tip_timestamp_brt(raw_ts)
-                if dt_brt.strftime("%Y-%m-%d") == today_str:
-                    m_id = str(item.get("match_id") or key)
-                    seen_matches.add(m_id)
-
-    # 4. Quaternary Source: Live audit log (covers all past tips before container restart)
-    audit_file = os.path.join(os.path.dirname(__file__), "dashboard", "live_audit_log.json")
-    if os.path.exists(audit_file):
-        try:
-            with open(audit_file, "r", encoding="utf-8") as f:
-                audit_items = json.load(f)
-            for item in audit_items:
-                ts = str(item.get("timestamp", ""))
-                if not ts.startswith(today_str):
-                    continue
-                m_name = str(item.get("market_name", "")).lower()
-                m_id = str(item.get("match_id") or item.get("fixture", "") or "")
-
-                matched = False
-                if "fifa_asian_handicap" in equivalent_keys and ("handicap" in m_name or "ah" in m_name):
-                    matched = True
-                elif "fifa_goals_ou" in equivalent_keys and ("gols" in m_name or "goals" in m_name or "over/under" in m_name):
-                    matched = True
-                elif "fifa_money_line" in equivalent_keys and ("money line" in m_name or "ml" in m_name or "empate anula" in m_name):
-                    matched = True
-                elif "ebasket_money_line" in equivalent_keys and ("ebasket" in m_name or "basketball" in m_name or "basquete" in m_name) and ("money" in m_name or "ml" in m_name or "resultado final" in m_name):
-                    matched = True
-                elif ("ebasket_ou" in equivalent_keys or "ebasket_points" in equivalent_keys) and ("ebasket" in m_name or "basketball" in m_name or "basquete" in m_name) and ("over" in m_name or "points" in m_name or "pontos" in m_name or "o/u" in m_name or "ou" in m_name):
-                    matched = True
-
-                if matched and m_id:
-                    seen_matches.add(m_id)
-        except Exception:
-            pass
-
-    # Auto-sync newly discovered historical matches to permanent daily ledger with STRICT DAILY CAP enforcement
+    dispatched_today = today_settled_ids.union(pending_ids)
     daily_cap = DAILY_TIP_LIMITS.get(channel_key, 150)
-    if seen_matches:
-        try:
-            ledger = load_daily_tip_ledger()
-            if today_str not in ledger:
-                ledger[today_str] = {}
-            if channel_key not in ledger[today_str]:
-                ledger[today_str][channel_key] = []
-            updated = False
-            for m_id in seen_matches:
-                if len(ledger[today_str][channel_key]) >= daily_cap:
-                    break
-                if m_id not in ledger[today_str][channel_key]:
-                    ledger[today_str][channel_key].append(m_id)
-                    updated = True
-            if updated:
-                os.makedirs(os.path.dirname(DAILY_LEDGER_FILE), exist_ok=True)
-                with open(DAILY_LEDGER_FILE, "w", encoding="utf-8") as f:
-                    json.dump(ledger, f, indent=2)
-        except Exception:
-            pass
+    return min(len(dispatched_today), daily_cap)
 
-    return min(len(seen_matches), daily_cap)
 
 def is_daily_limit_reached(channel_key: str) -> bool:
     """Checks if a channel has reached its configured daily tip limit."""
@@ -1562,25 +1501,14 @@ def generate_performance_report_text(
     run_hash = hashlib.sha256(run_seed.encode("utf-8")).hexdigest()[:8].upper()
     run_id = f"RUN-{clean_date}-{code_tag}-{run_hash}"
 
-    # 1. Query published count for today from persistent daily ledger with STRICT DAILY CAP
-    daily_cap = DAILY_TIP_LIMITS.get(channel_key, 150)
-    daily_ledger = load_daily_tip_ledger()
-    raw_published = daily_ledger.get(report_date_str, {}).get(channel_key, [])
-    
-    # Enforce strict daily cap on report generation so reports never exceed agreed limits
-    published_matches = raw_published[:daily_cap]
-    published_count = len(published_matches)
-    published_match_ids = {str(m) for m in published_matches if m}
-
-    # 2. Query settled tips ledger - STRICT ISOLATION TO ONLY MATCHES DISPATCHED ON report_date_str
+    # 1. Query settled tips ledger for report_date_str
     all_settled = load_settled_tips_ledger()
     today_settled_raw = [
         it for it in all_settled
         if it.get("channel_key") == channel_key 
-        and it.get("date_brt") == report_date_str
-        and (str(it.get("match_id")) in published_match_ids if published_match_ids else True)
+        and str(it.get("date_brt", "")).startswith(report_date_str)
     ]
-    # Bound today's settled tips strictly to the daily cap
+    daily_cap = DAILY_TIP_LIMITS.get(channel_key, 150)
     today_settled = today_settled_raw[:daily_cap]
     today_settled_ids = {str(it.get("match_id")) for it in today_settled if it.get("match_id")}
 
@@ -1589,27 +1517,28 @@ def generate_performance_report_text(
         if it.get("channel_key") == channel_key and str(it.get("date_brt", "")).startswith(current_month_str)
     ]
 
-    # 3. Active / Pending Fixtures Count (STRICTLY SCOPED & CLAMPED TO DAILY CAP)
-    if published_count > 0:
-        settled_from_published = len(published_match_ids.intersection(today_settled_ids))
-        if settled_from_published > 0:
-            pending_count = max(0, published_count - settled_from_published)
-        else:
-            pending_count = max(0, published_count - len(today_settled))
-    else:
-        cache = load_published_tips_cache()
-        pending_count = sum(
-            1 for v in cache.values()
-            if isinstance(v, dict)
-            and v.get("type") == channel_key
-            and str(v.get("match_id")) not in today_settled_ids
-            and str(v.get("published_at_utc", ""))[:10] == report_date_str
-        )
+    # 2. Query genuine in-play pending tips from cache (published on report_date_str and < 4 hours old)
+    cache = load_published_tips_cache()
+    now_utc = datetime.now(timezone.utc)
+    real_pending = []
+    if isinstance(cache, dict):
+        for k, v in cache.items():
+            if isinstance(v, dict) and v.get("type") == channel_key:
+                m_id = str(v.get("match_id") or k)
+                if m_id not in today_settled_ids:
+                    raw_ts = v.get("published_at_utc") or v.get("timestamp")
+                    dt_tip_brt = parse_tip_timestamp_brt(raw_ts)
+                    if dt_tip_brt and dt_tip_brt.strftime("%Y-%m-%d") == report_date_str:
+                        dt_tip_utc = dt_tip_brt.astimezone(timezone.utc)
+                        if (now_utc - dt_tip_utc).total_seconds() <= 4 * 3600:
+                            real_pending.append(m_id)
 
-    # Strictly clamp pending count so settled + pending can NEVER exceed daily_cap
     max_allowed_pending = max(0, daily_cap - len(today_settled))
-    pending_count = min(pending_count, max_allowed_pending)
+    pending_count = min(len(real_pending), max_allowed_pending)
     pending_exposure = float(pending_count) * 1.0
+
+    # 3. Authentic Dispatched Count = Settled Today + Active In-Play Pending
+    published_count = min(daily_cap, len(today_settled) + pending_count)
 
     # 4. Status determination
     if pending_count > 0:

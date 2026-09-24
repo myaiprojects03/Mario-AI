@@ -199,21 +199,12 @@ def generate_midnight_report(target_date_str: str, channel_key: str) -> str:
     run_hash = hashlib.sha256(run_seed.encode("utf-8")).hexdigest()[:8].upper()
     run_id = f"RUN-{clean_date}-{code_tag}-{run_hash}"
 
-    # 1. Load Dispatched Tips from Daily Ledger with STRICT CAP ENFORCEMENT
-    daily_ledger = load_json_file(DAILY_LEDGER_FILE, {})
-    raw_published = daily_ledger.get(target_date_str, {}).get(channel_key, [])
-    # Clamp to cap
-    published_matches = raw_published[:daily_cap]
-    published_count = len(published_matches)
-    published_match_ids = {str(m) for m in published_matches if m}
-
-    # 2. Load Settled Tips Ledger with STRICT DATE ISOLATION
+    # 1. Load Settled Tips Ledger with STRICT DATE ISOLATION
     all_settled = load_json_file(SETTLED_TIPS_LEDGER_FILE, [])
     today_settled_raw = [
         it for it in all_settled
         if it.get("channel_key") == channel_key
         and str(it.get("date_brt", "")).startswith(target_date_str)
-        and (str(it.get("match_id")) in published_match_ids if published_match_ids else True)
     ]
     today_settled = today_settled_raw[:daily_cap]
     today_settled_ids = {str(it.get("match_id")) for it in today_settled if it.get("match_id")}
@@ -223,22 +214,29 @@ def generate_midnight_report(target_date_str: str, channel_key: str) -> str:
         if it.get("channel_key") == channel_key and str(it.get("date_brt", "")).startswith(current_month_str)
     ]
 
-    # 3. Active / Pending Count (strictly bounded to published count)
-    if published_count > 0:
-        settled_from_published = len(published_match_ids.intersection(today_settled_ids))
-        pending_count = max(0, published_count - settled_from_published)
-    else:
-        cache = load_json_file(PUBLISHED_TIPS_CACHE_FILE, {})
-        pending_count = sum(
-            1 for v in cache.values()
-            if isinstance(v, dict)
-            and v.get("type") == channel_key
-            and str(v.get("match_id")) not in today_settled_ids
-            and str(v.get("published_at_utc", ""))[:10] == target_date_str
-        )
-        pending_count = min(pending_count, daily_cap)
+    # 2. Genuine Active / Pending Count (matches in cache published on target_date_str awaiting score)
+    cache = load_json_file(PUBLISHED_TIPS_CACHE_FILE, {})
+    now_utc = datetime.now(timezone.utc)
+    real_pending = []
+    if isinstance(cache, dict):
+        for k, v in cache.items():
+            if isinstance(v, dict) and v.get("type") == channel_key:
+                m_id = str(v.get("match_id") or k)
+                if m_id not in today_settled_ids:
+                    raw_ts = v.get("published_at_utc") or v.get("timestamp")
+                    dt_tip_brt = parse_tip_timestamp_brt(raw_ts)
+                    if dt_tip_brt and dt_tip_brt.strftime("%Y-%m-%d") == target_date_str:
+                        # Exclude stale tips older than 4 hours
+                        dt_tip_utc = dt_tip_brt.astimezone(timezone.utc)
+                        if (now_utc - dt_tip_utc).total_seconds() <= 4 * 3600:
+                            real_pending.append(m_id)
 
+    max_allowed_pending = max(0, daily_cap - len(today_settled))
+    pending_count = min(len(real_pending), max_allowed_pending)
     pending_exposure = float(pending_count) * 1.0
+
+    # 3. Authentic Dispatched Count = Settled Today + Active In-Play Pending
+    published_count = min(daily_cap, len(today_settled) + pending_count)
 
     # 4. Status Determination
     if pending_count > 0:
