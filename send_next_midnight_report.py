@@ -240,9 +240,9 @@ def generate_midnight_report(target_date_str: str, channel_key: str) -> str:
 
     # 4. Status Determination
     if pending_count > 0:
-        report_status = f"PROVISIONAL — settlement still pending ({pending_count} tips in-play / awaiting scores)"
+        report_status = f"Reconciled — Provisional ({pending_count} pending tips in-play / awaiting settlement)"
     else:
-        report_status = "FINAL — all eligible results have been reconciled"
+        report_status = "Reconciled — Final"
 
     # 5. Calculate Today's Settled Figures
     today_wins = 0.0

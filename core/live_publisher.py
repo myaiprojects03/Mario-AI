@@ -1535,11 +1535,11 @@ def generate_performance_report_text(
 
     # 4. Status determination
     if pending_count > 0:
-        report_status = f"PROVISIONAL — settlement still pending ({pending_count} tips in-play / awaiting scores)"
-        status_tag = "PROVISIONAL"
+        report_status = f"Reconciled — Provisional ({pending_count} pending tips in-play / awaiting settlement)"
+        status_tag = "Reconciled — Provisional"
     else:
-        report_status = "FINAL — all eligible results have been reconciled"
-        status_tag = "FINAL"
+        report_status = "Reconciled — Final"
+        status_tag = "Reconciled — Final"
 
     # 5. Calculate Today's Settled Figures
     today_wins = 0.0
