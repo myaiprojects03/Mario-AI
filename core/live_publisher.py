@@ -1202,9 +1202,8 @@ def get_today_published_tip_count(channel_key: str, dt_brt=None) -> int:
     ]
     today_settled_ids = {str(it.get("match_id")) for it in today_settled if it.get("match_id")}
 
-    # 2. Genuine in-play pending tips published today (must have msg_id and be < 4 hours old)
+    # 2. Genuine in-play pending tips published today (all tips broadcast on today_str)
     cache = load_published_tips_cache()
-    now_utc = datetime.now(timezone.utc)
     pending_ids = set()
     if isinstance(cache, dict):
         for key, item in cache.items():
@@ -1217,13 +1216,10 @@ def get_today_published_tip_count(channel_key: str, dt_brt=None) -> int:
                     raw_ts = item.get("published_at_utc") or item.get("timestamp")
                     dt_tip_brt = parse_tip_timestamp_brt(raw_ts)
                     if dt_tip_brt and dt_tip_brt.strftime("%Y-%m-%d") == today_str:
-                        dt_tip_utc = dt_tip_brt.astimezone(timezone.utc)
-                        if (now_utc - dt_tip_utc).total_seconds() <= 4 * 3600:
-                            pending_ids.add(m_id)
+                        pending_ids.add(m_id)
 
     dispatched_today = today_settled_ids.union(pending_ids)
-    daily_cap = DAILY_TIP_LIMITS.get(channel_key, 150)
-    return min(len(dispatched_today), daily_cap)
+    return len(dispatched_today)
 
 
 def is_daily_limit_reached(channel_key: str) -> bool:
@@ -1517,9 +1513,8 @@ def generate_performance_report_text(
         if it.get("channel_key") == channel_key and str(it.get("date_brt", "")).startswith(current_month_str)
     ]
 
-    # 2. Query genuine in-play pending tips from cache (published on report_date_str and < 4 hours old)
+    # 2. Query genuine in-play pending tips from cache (all tips broadcast on report_date_str)
     cache = load_published_tips_cache()
-    now_utc = datetime.now(timezone.utc)
     real_pending = []
     if isinstance(cache, dict):
         for k, v in cache.items():
@@ -1529,9 +1524,7 @@ def generate_performance_report_text(
                     raw_ts = v.get("published_at_utc") or v.get("timestamp")
                     dt_tip_brt = parse_tip_timestamp_brt(raw_ts)
                     if dt_tip_brt and dt_tip_brt.strftime("%Y-%m-%d") == report_date_str:
-                        dt_tip_utc = dt_tip_brt.astimezone(timezone.utc)
-                        if (now_utc - dt_tip_utc).total_seconds() <= 4 * 3600:
-                            real_pending.append(m_id)
+                        real_pending.append(m_id)
 
     max_allowed_pending = max(0, daily_cap - len(today_settled))
     pending_count = min(len(real_pending), max_allowed_pending)
