@@ -402,6 +402,7 @@ def compute_dashboard_analytics_and_charts(
     wins = 0.0
     losses = 0.0
     voids = 0
+    pushes = 0
     half_wins = 0
     half_losses = 0
     pending_count = 0
@@ -456,12 +457,16 @@ def compute_dashboard_analytics_and_charts(
             curr_win = 0
             if curr_loss > max_loss_streak:
                 max_loss_streak = curr_loss
-        elif res in ["VOID", "PUSH"]:
+        elif res == "PUSH":
+            pushes += 1
+            curr_win = 0
+            curr_loss = 0
+        elif res in ["VOID"]:
             voids += 1
             curr_win = 0
             curr_loss = 0
 
-    settled_count = int(wins + losses + voids)
+    settled_count = int(wins + losses + voids + pushes)
     decided_count = wins + losses
     hit_rate = (wins / decided_count * 100.0) if decided_count > 0 else 0.0
     roi = (total_units / total_staked * 100.0) if total_staked > 0 else 0.0
@@ -509,6 +514,38 @@ def compute_dashboard_analytics_and_charts(
     sign_units = "+" if total_units >= 0 else ""
     sign_roi = "+" if roi >= 0 else ""
 
+    curr_active_type = None
+    curr_active_count = 0
+    for tip in reversed(chronological_tips):
+        res_tip = str(tip.get("result", "")).upper()
+        if "PENDING" in res_tip:
+            continue
+        if res_tip in ["VOID", "PUSH"]:
+            continue
+        if res_tip in ["WIN", "WON", "HALF_WIN"]:
+            if curr_active_type is None:
+                curr_active_type = "W"
+            if curr_active_type == "W":
+                curr_active_count += 1
+            else:
+                break
+        elif res_tip in ["LOSS", "LOST", "HALF_LOSS"]:
+            if curr_active_type is None:
+                curr_active_type = "L"
+            if curr_active_type == "L":
+                curr_active_count += 1
+            else:
+                break
+
+    if curr_active_type == "W":
+        current_streak_desc = f"{curr_active_count} Win" if curr_active_count == 1 else f"{curr_active_count} Wins"
+    elif curr_active_type == "L":
+        current_streak_desc = f"{curr_active_count} Loss" if curr_active_count == 1 else f"{curr_active_count} Losses"
+    else:
+        current_streak_desc = "None"
+
+    longest_streak_desc = f"{max_win_streak}W / {max_loss_streak}L"
+
     analytics_data = {
         "channel_name": PROD_CHANNELS[target_channel]["name"] if target_channel in PROD_CHANNELS else "All Channels (Master View)",
         "channel_status": PROD_CHANNELS[target_channel]["status"] if target_channel in PROD_CHANNELS else "LIVE",
@@ -516,18 +553,23 @@ def compute_dashboard_analytics_and_charts(
         "roi": f"{sign_roi}{roi:.1f}%",
         "hit_rate": f"{hit_rate:.1f}%",
         "evaluated_tips": f"{settled_count:,}",
+        "settled_tips": f"{settled_count:,}",
+        "published_tips": f"{settled_count + pending_count:,}",
         "pending_tips": f"{pending_count:,}",
         "tips_per_day": f"{tips_per_day}",
         "monthly_pace": f"~{monthly_pace:,} tips",
         "monthly_estimate": f"{sign_units}{total_units*0.8:.1f} to {sign_units}{total_units*1.2:.1f}u",
         "max_drawdown": f"{max_dd:.2f}u",
         "drawdown_dates": f"{sorted_dates[0] if sorted_dates else 'N/A'} -> {sorted_dates[-1] if sorted_dates else 'N/A'}",
-        "winning_losing_streak": f"{max_win_streak} / {max_loss_streak}",
+        "current_streak": current_streak_desc,
+        "longest_streak": longest_streak_desc,
+        "winning_losing_streak": f"{current_streak_desc} (Rec: {longest_streak_desc})",
         "best_day": best_day_str if sorted_dates else "+0.00u",
         "worst_day": worst_day_str if sorted_dates else "-0.00u",
         "wins": int(wins),
         "losses": int(losses),
         "voids": voids,
+        "pushes": pushes,
         "half_wins": half_wins,
         "half_losses": half_losses
     }
@@ -676,12 +718,17 @@ async def get_market_breakdown(request: Request, filter_days: Optional[str] = "a
             "channel_key": ch_key,
             "market_name": meta["name"],
             "status": meta["status"],
+            "published_tips": data.get("published_tips", data["evaluated_tips"]),
             "evaluated_tips": data["evaluated_tips"],
+            "settled_tips": data.get("settled_tips", data["evaluated_tips"]),
             "wins": data["wins"],
             "losses": data["losses"],
             "voids": data["voids"],
+            "pushes": data.get("pushes", 0),
             "half_wins": data["half_wins"],
             "half_losses": data["half_losses"],
+            "current_streak": data.get("current_streak", "None"),
+            "longest_streak": data.get("longest_streak", "0W / 0L"),
             "hit_rate": data["hit_rate"],
             "net_units": data["accumulated_units"],
             "roi": data["roi"],

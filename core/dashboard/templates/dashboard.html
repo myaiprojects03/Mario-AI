@@ -186,9 +186,9 @@
                 <div class="sub-metric-subtext">Taxa de acerto global</div>
             </div>
             <div class="sub-metric-item">
-                <div class="sub-metric-label">TIPS AVALIADAS</div>
+                <div class="sub-metric-label">TIPS SETTLED / AVALIADAS</div>
                 <div class="sub-metric-val" id="val-evaluated-tips">0</div>
-                <div class="sub-metric-subtext" id="val-pending-subtext">0 pendentes em andamento</div>
+                <div class="sub-metric-subtext" id="val-pending-subtext">0 pendentes | 0 publicadas</div>
             </div>
             <div class="sub-metric-item">
                 <div class="sub-metric-label">TIPS POR DIA</div>
@@ -211,9 +211,9 @@
                 <div class="sub-metric-subtext" id="val-drawdown-dates">N/A</div>
             </div>
             <div class="sub-metric-item">
-                <div class="sub-metric-label">MAIOR SEQ. (W / L)</div>
-                <div class="sub-metric-val" id="val-streaks">0 / 0</div>
-                <div class="sub-metric-subtext">Sequências recordes</div>
+                <div class="sub-metric-label">SEQUÊNCIAS (ATUAL / RECORDE)</div>
+                <div class="sub-metric-val" id="val-streaks" style="font-size:1.15rem;">-</div>
+                <div class="sub-metric-subtext">Sequência atual e maior recorde</div>
             </div>
             <div class="sub-metric-item">
                 <div class="sub-metric-label">MELHOR DIA</div>
@@ -262,11 +262,14 @@
                     <tr>
                         <th>MERCADO / CANAL</th>
                         <th>STATUS</th>
-                        <th>TIPS AVALIADAS</th>
+                        <th>PUBLICADAS</th>
+                        <th>SETTLED</th>
                         <th>WINS</th>
                         <th>LOSSES</th>
                         <th>VOIDS</th>
+                        <th>PUSHES</th>
                         <th>HALF W / L</th>
+                        <th>STREAK (ATUAL / MAX)</th>
                         <th>HIT RATE</th>
                         <th>NET UNITS</th>
                         <th>ROI</th>
@@ -275,7 +278,7 @@
                     </tr>
                 </thead>
                 <tbody id="tbody-market-breakdown">
-                    <tr><td colspan="12" style="text-align:center;color:#6b7280;padding:16px;">Carregando métricas de mercados...</td></tr>
+                    <tr><td colspan="15" style="text-align:center;color:#6b7280;padding:16px;">Carregando métricas de mercados...</td></tr>
                 </tbody>
             </table>
         </div>
@@ -584,7 +587,7 @@
 
                 document.getElementById('val-hit-rate').innerText = a.hit_rate;
                 document.getElementById('val-evaluated-tips').innerText = a.evaluated_tips;
-                document.getElementById('val-pending-subtext').innerText = `${a.pending_tips} pendentes em andamento`;
+                document.getElementById('val-pending-subtext').innerText = `${a.pending_tips} pendentes | ${a.published_tips} publicadas`;
 
                 document.getElementById('val-tips-per-day').innerText = a.tips_per_day;
                 document.getElementById('val-monthly-pace').innerText = a.monthly_pace;
@@ -750,12 +753,15 @@
                     rows.push(`
                         <tr>
                             <td><strong>${m.market_name}</strong></td>
-                            <td><span class="badge-live">${m.status} 🟢</span></td>
-                            <td>${m.evaluated_tips}</td>
+                            <td><span class="badge-live">${m.status}</span></td>
+                            <td><strong>${m.published_tips}</strong></td>
+                            <td>${m.settled_tips}</td>
                             <td style="color:#10b981;font-weight:600;">${m.wins}</td>
                             <td style="color:#ef4444;font-weight:600;">${m.losses}</td>
-                            <td>${m.voids}</td>
+                            <td style="color:#9ca3af;">${m.voids}</td>
+                            <td style="color:#9ca3af;">${m.pushes}</td>
                             <td>${m.half_wins} / ${m.half_losses}</td>
+                            <td><span style="color:#60a5fa;font-weight:600;">${m.current_streak}</span> <span style="color:#6b7280;font-size:0.85em;">(${m.longest_streak})</span></td>
                             <td><strong>${m.hit_rate}</strong></td>
                             <td style="color:${unitColor};font-weight:800;">${m.net_units}</td>
                             <td style="color:${roiColor};font-weight:700;">${m.roi}</td>
