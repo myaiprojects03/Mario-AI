@@ -99,11 +99,11 @@ def get_channel_config() -> Tuple[Dict[str, str], Dict[str, str], str]:
     default_channel = os.getenv("TELEGRAM_CHANNEL_ID", "")
 
     channel_map = {
-        "fifa_goals_ou": os.getenv("TELEGRAM_CHANNEL_ID_FIFA_GOALS_OU") or default_channel,
-        "fifa_asian_handicap": os.getenv("TELEGRAM_CHANNEL_ID_FIFA_ASIAN_HANDICAP") or default_channel,
-        "fifa_money_line": os.getenv("TELEGRAM_CHANNEL_ID_FIFA_MONEY_LINE") or default_channel,
-        "ebasket_money_line": os.getenv("TELEGRAM_CHANNEL_ID_EBASKET_MONEY_LINE") or default_channel,
-        "ebasket_ou": os.getenv("TELEGRAM_CHANNEL_ID_EBASKET_OU") or os.getenv("TELEGRAM_CHANNEL_ID_EBASKET_POINTS") or default_channel,
+        "fifa_goals_ou": os.getenv("TELEGRAM_CHANNEL_FIFA_GOALS") or os.getenv("TELEGRAM_CHANNEL_ID_FIFA_GOALS_OU") or default_channel,
+        "fifa_asian_handicap": os.getenv("TELEGRAM_CHANNEL_FIFA_AH") or os.getenv("TELEGRAM_CHANNEL_ID_FIFA_ASIAN_HANDICAP") or default_channel,
+        "fifa_money_line": os.getenv("TELEGRAM_CHANNEL_FIFA_ML") or os.getenv("TELEGRAM_CHANNEL_ID_FIFA_MONEY_LINE") or default_channel,
+        "ebasket_money_line": os.getenv("TELEGRAM_CHANNEL_EBASKET_ML") or os.getenv("TELEGRAM_CHANNEL_ID_EBASKET_MONEY_LINE") or default_channel,
+        "ebasket_ou": os.getenv("TELEGRAM_CHANNEL_EBASKET_OU") or os.getenv("TELEGRAM_CHANNEL_EBASKET_POINTS") or os.getenv("TELEGRAM_CHANNEL_ID_EBASKET_OU") or os.getenv("TELEGRAM_CHANNEL_ID_EBASKET_POINTS") or default_channel,
     }
 
     bot_tokens = {
