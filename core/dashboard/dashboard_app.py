@@ -170,6 +170,7 @@ def load_reconciled_live_tips() -> List[Dict[str, Any]]:
                     "timing_audit": ts_display,
                     "link_status": "VALID BET365 LINK",
                     "result": outcome,
+                    "outcome": outcome,
                     "delivery_status": "PUBLISHED",
                     "match_link": f"https://www.bet365.bet.br/#/IP/EV{m_id}" if m_id else "https://www.bet365.bet.br/",
                     "net_units": net_u
@@ -215,6 +216,7 @@ def load_reconciled_live_tips() -> List[Dict[str, Any]]:
                             "timing_audit": settled_brt,
                             "link_status": "VALID BET365 LINK",
                             "result": outcome,
+                            "outcome": outcome,
                             "delivery_status": "PUBLISHED",
                             "match_link": f"https://www.bet365.bet.br/#/IP/EV{m_id}" if m_id else "https://www.bet365.bet.br/",
                             "net_units": net_u
@@ -272,6 +274,7 @@ def load_reconciled_live_tips() -> List[Dict[str, Any]]:
                     "timing_audit": f"{brt_date_str} {brt_time_str}",
                     "link_status": "VALID BET365 LINK",
                     "result": "PENDING",
+                    "outcome": "PENDING",
                     "delivery_status": "PUBLISHED",
                     "match_link": f"https://www.bet365.bet.br/#/IP/EV{m_id}" if m_id else "https://www.bet365.bet.br/",
                     "net_units": 0.0
@@ -286,9 +289,11 @@ def load_reconciled_live_tips() -> List[Dict[str, Any]]:
                 audit_items = json.load(f)
             for idx, item in enumerate(audit_items):
                 m_id = str(item.get("match_id") or "").strip()
+                if not m_id:
+                    continue
                 m_name = item.get("market_name", "FIFA Goals Over/Under")
                 ch_key = normalize_channel_key(m_name)
-                unique_key = f"{m_id}_{ch_key}" if m_id else f"audit_{idx}_{ch_key}"
+                unique_key = f"{m_id}_{ch_key}"
 
                 if unique_key in all_tips_map:
                     continue
@@ -391,6 +396,10 @@ def compute_dashboard_analytics_and_charts(
             cutoff = (now_brt - timedelta(days=14)).strftime("%Y-%m-%d")
             if d_str < cutoff:
                 continue
+        elif f_mode in ("mtd", "month", "mes"):
+            current_month = now_brt.strftime("%Y-%m")
+            if not d_str.startswith(current_month):
+                continue
         elif f_mode == "custom":
             if from_date and d_str < str(from_date).strip():
                 continue
@@ -475,7 +484,8 @@ def compute_dashboard_analytics_and_charts(
     best_val = -9999.0
     worst_val = 9999.0
     best_day_str = "+0.00u"
-    worst_day_str = "-0.00u"
+    worst_day_str = "+0.00u" if sorted_dates else "-0.00u"
+    has_losing_day = False
 
     cum_sum = 0.0
     peak = -9999.0
@@ -496,6 +506,8 @@ def compute_dashboard_analytics_and_charts(
             worst_val = d_val
             sign_w = "+" if d_val >= 0 else ""
             worst_day_str = f"{sign_w}{d_val:.2f}u ({d[5:]})"
+            if d_val < 0:
+                has_losing_day = True
 
         if cum_sum > peak:
             peak = cum_sum
@@ -566,6 +578,7 @@ def compute_dashboard_analytics_and_charts(
         "winning_losing_streak": f"{current_streak_desc} (Rec: {longest_streak_desc})",
         "best_day": best_day_str if sorted_dates else "+0.00u",
         "worst_day": worst_day_str if sorted_dates else "-0.00u",
+        "has_losing_day": has_losing_day,
         "wins": int(wins),
         "losses": int(losses),
         "voids": voids,

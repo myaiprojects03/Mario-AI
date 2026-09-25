@@ -223,7 +223,7 @@
             <div class="sub-metric-item">
                 <div class="sub-metric-label">PIOR DIA</div>
                 <div class="sub-metric-val red" id="val-worst-day">-0.00u</div>
-                <div class="sub-metric-subtext">Maior perda diária</div>
+                <div class="sub-metric-subtext" id="subtext-worst-day">Maior perda diária</div>
             </div>
         </div>
     </div>
@@ -596,7 +596,16 @@
                 document.getElementById('val-drawdown-dates').innerText = a.drawdown_dates;
                 document.getElementById('val-streaks').innerText = a.winning_losing_streak;
                 document.getElementById('val-best-day').innerText = a.best_day;
-                document.getElementById('val-worst-day').innerText = a.worst_day;
+                const worstEl = document.getElementById('val-worst-day');
+                const worstSub = document.getElementById('subtext-worst-day');
+                worstEl.innerText = a.worst_day;
+                if (a.has_losing_day === false || (a.worst_day && a.worst_day.startsWith('+'))) {
+                    worstEl.className = "sub-metric-val green";
+                    if (worstSub) worstSub.innerText = "Menor ganho di?rio (100% dias positivos)";
+                } else {
+                    worstEl.className = "sub-metric-val red";
+                    if (worstSub) worstSub.innerText = "Maior perda di?ria";
+                }
             } catch (err) {
                 console.error("Error fetching analytics:", err);
             }

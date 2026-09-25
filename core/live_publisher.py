@@ -1419,7 +1419,7 @@ def calculate_channel_streak(settled_list: List[Dict[str, Any]]) -> Tuple[str, i
     consecutive_losses = 0
 
     for it in reversed(sorted_tips):
-        out = str(it.get("outcome", "")).upper()
+        out = str(it.get("outcome") or it.get("result", "")).upper()
         if out in ["VOID", "PUSH"]:
             continue
         elif out in ["WIN", "WON", "HALF_WIN"]:
@@ -1438,7 +1438,7 @@ def calculate_channel_streak(settled_list: List[Dict[str, Any]]) -> Tuple[str, i
                 break
 
     for it in reversed(sorted_tips):
-        out = str(it.get("outcome", "")).upper()
+        out = str(it.get("outcome") or it.get("result", "")).upper()
         if out in ["VOID", "PUSH"]:
             continue
         elif out in ["LOSS", "LOST", "HALF_LOSS"]:
@@ -1497,40 +1497,55 @@ def generate_performance_report_text(
     run_hash = hashlib.sha256(run_seed.encode("utf-8")).hexdigest()[:8].upper()
     run_id = f"RUN-{clean_date}-{code_tag}-{run_hash}"
 
-    # 1. Query settled tips ledger for report_date_str
-    all_settled = load_settled_tips_ledger()
+    # 1. Query unified reconciled tips (PostgreSQL + JSON Ledger + In-Play Cache deduplicated by match_id)
+    try:
+        from core.dashboard.dashboard_app import load_reconciled_live_tips, normalize_channel_key
+        unified_tips = load_reconciled_live_tips()
+    except Exception as e:
+        logger.warning(f"Error loading reconciled live tips: {e}")
+        unified_tips = load_settled_tips_ledger()
+
+    norm_target_ch = normalize_channel_key(channel_key) if 'normalize_channel_key' in locals() else channel_key
+
+    # Separate settled vs pending using normalized channel key and deduplicated match_id
+    channel_settled = []
+    channel_pending = []
+    for it in unified_tips:
+        raw_ch = it.get("channel_key") or it.get("market_name", "")
+        it_ch = normalize_channel_key(raw_ch) if 'normalize_channel_key' in locals() else raw_ch
+        if it_ch != norm_target_ch:
+            continue
+        res = str(it.get("result") or it.get("outcome", "")).upper()
+        if "PENDING" in res:
+            channel_pending.append(it)
+        else:
+            channel_settled.append(it)
+
     today_settled_raw = [
-        it for it in all_settled
-        if it.get("channel_key") == channel_key 
-        and str(it.get("date_brt", "")).startswith(report_date_str)
+        it for it in channel_settled
+        if str(it.get("date_brt", "") or it.get("timestamp", ""))[:10].startswith(report_date_str)
     ]
     daily_cap = DAILY_TIP_LIMITS.get(channel_key, 150)
     today_settled = today_settled_raw[:daily_cap]
     today_settled_ids = {str(it.get("match_id")) for it in today_settled if it.get("match_id")}
 
     mtd_settled = [
-        it for it in all_settled
-        if it.get("channel_key") == channel_key and str(it.get("date_brt", "")).startswith(current_month_str)
+        it for it in channel_settled
+        if str(it.get("date_brt", "") or it.get("timestamp", ""))[:10].startswith(current_month_str)
     ]
 
-    # 2. Query genuine in-play pending tips from cache (all tips broadcast on report_date_str)
-    cache = load_published_tips_cache()
-    real_pending = []
-    if isinstance(cache, dict):
-        for k, v in cache.items():
-            if isinstance(v, dict) and v.get("type") == channel_key:
-                m_id = str(v.get("match_id") or k)
-                if m_id not in today_settled_ids:
-                    raw_ts = v.get("published_at_utc") or v.get("timestamp")
-                    dt_tip_brt = parse_tip_timestamp_brt(raw_ts)
-                    if dt_tip_brt and dt_tip_brt.strftime("%Y-%m-%d") == report_date_str:
-                        real_pending.append(m_id)
+    # Query genuine in-play pending tips for report_date_str
+    today_pending = [
+        it for it in channel_pending
+        if str(it.get("date_brt", "") or it.get("timestamp", ""))[:10].startswith(report_date_str)
+        and str(it.get("match_id")) not in today_settled_ids
+    ]
 
     max_allowed_pending = max(0, daily_cap - len(today_settled))
-    pending_count = min(len(real_pending), max_allowed_pending)
+    pending_count = min(len(today_pending), max_allowed_pending)
     pending_exposure = float(pending_count) * 1.0
 
-    # 3. Authentic Dispatched Count = Settled Today + Active In-Play Pending
+    # Authentic Dispatched Count = Settled Today + Active In-Play Pending
     published_count = min(daily_cap, len(today_settled) + pending_count)
 
     # 4. Status determination
@@ -1551,7 +1566,7 @@ def generate_performance_report_text(
     today_units = 0.0
 
     for it in today_settled:
-        out = str(it.get("outcome", "")).upper()
+        out = str(it.get("outcome") or it.get("result", "")).upper()
         u = float(it.get("net_units", 0.0))
         today_units += u
         if out in ["WIN", "WON"]:
@@ -1587,7 +1602,7 @@ def generate_performance_report_text(
     mtd_units = 0.0
 
     for it in mtd_settled:
-        out = str(it.get("outcome", "")).upper()
+        out = str(it.get("outcome") or it.get("result", "")).upper()
         u = float(it.get("net_units", 0.0))
         mtd_units += u
         if out in ["WIN", "WON"]:

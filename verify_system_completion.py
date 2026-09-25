@@ -136,7 +136,11 @@ def main():
     master_seed = f"MASTER:{as_of_timestamp}:{today_str}"
     master_run_id = f"RUN-{now_brt.strftime('%Y%m%d')}-MASTER-{hashlib.sha256(master_seed.encode('utf-8')).hexdigest()[:8].upper()}"
 
-    settled_ledger = load_json("core/dashboard/settled_tips_ledger.json", [])
+    try:
+        from core.dashboard.dashboard_app import load_reconciled_live_tips
+        settled_ledger = load_reconciled_live_tips()
+    except Exception:
+        settled_ledger = load_json("core/dashboard/settled_tips_ledger.json", [])
     cache = load_json("core/dashboard/published_tips_cache.json", {})
 
     print("=" * 110)

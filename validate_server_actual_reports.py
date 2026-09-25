@@ -119,7 +119,11 @@ def main():
     current_time_str = now_brt.strftime("%Y-%m-%d %H:%M:%S BRT")
 
     # Authoritative JSON & Postgres data
-    settled_data = load_json("core/dashboard/settled_tips_ledger.json", [])
+    try:
+        from core.dashboard.dashboard_app import load_reconciled_live_tips
+        settled_data = load_reconciled_live_tips()
+    except Exception:
+        settled_data = load_json("core/dashboard/settled_tips_ledger.json", [])
     cache_data = load_json("core/dashboard/report_dispatch_cache.json", {})
     log_dispatches = query_container_log_dispatches()
 
