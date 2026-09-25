@@ -450,7 +450,7 @@ def dispatch_sample(report_type: str = "both", target_channel: str = None, dry_r
 
 def main():
     parser = argparse.ArgumentParser(description="Dispatch Sample Performance Reports to Telegram (Zero Dependencies)")
-    parser.add_argument("--type", choices=["partial", "midnight", "both"], default="both", help="Report type to send")
+    parser.add_argument("--type", choices=["partial", "midnight", "both"], default="partial", help="Report type to send (specify partial or midnight; both should only be used in dry-run)")
     parser.add_argument("--channel", type=str, default=None, help="Specific channel key (e.g. fifa_goals_ou)")
     parser.add_argument("--dry-run", action="store_true", help="Print reports to terminal without sending to Telegram")
     parser.add_argument("--date", type=str, default=None, help="Target date YYYY-MM-DD")
