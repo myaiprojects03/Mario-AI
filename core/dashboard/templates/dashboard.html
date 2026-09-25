@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,58 +8,299 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
-        body { background-color: #0f1117; color: #e5e7eb; min-height: 100vh; padding: 20px; font-size: 14px; }
-        
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+
+        body {
+            background-color: #0f1117;
+            color: #e5e7eb;
+            min-height: 100vh;
+            padding: 20px;
+            font-size: 14px;
+        }
+
         /* Top Navigation Bar */
-        .top-nav { display: flex; justify-content: space-between; align-items: center; background: #161922; padding: 14px 24px; border-radius: 12px; border: 1px solid #262b38; margin-bottom: 20px; }
-        .nav-title-group { display: flex; align-items: center; gap: 12px; }
-        .nav-title { font-size: 18px; font-weight: 800; color: #ffffff; letter-spacing: 0.5px; }
-        .badge-live-prod { background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; }
-        .btn-logout { background: #262b38; color: #9ca3af; padding: 8px 16px; border-radius: 8px; text-decoration: none; font-size: 12px; font-weight: 600; transition: all 0.2s; }
-        .btn-logout:hover { background: #ef4444; color: #fff; }
+        .top-nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #161922;
+            padding: 14px 24px;
+            border-radius: 12px;
+            border: 1px solid #262b38;
+            margin-bottom: 20px;
+        }
+
+        .nav-title-group {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .nav-title {
+            font-size: 18px;
+            font-weight: 800;
+            color: #ffffff;
+            letter-spacing: 0.5px;
+        }
+
+        .badge-live-prod {
+            background: rgba(16, 185, 129, 0.15);
+            color: #10b981;
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 700;
+        }
+
+        .btn-logout {
+            background: #262b38;
+            color: #9ca3af;
+            padding: 8px 16px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-size: 12px;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+
+        .btn-logout:hover {
+            background: #ef4444;
+            color: #fff;
+        }
 
         /* Filter Controls Bar */
-        .controls-bar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 20px; }
-        .filter-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-        .filter-pill { background: #161922; color: #9ca3af; border: 1px solid #262b38; padding: 8px 16px; border-radius: 20px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
-        .filter-pill:hover, .filter-pill.active { background: #3b82f6; color: #ffffff; border-color: #3b82f6; }
-        .filter-pill.live-pill { background: rgba(16, 185, 129, 0.1); color: #10b981; border-color: rgba(16, 185, 129, 0.3); }
+        .controls-bar {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 20px;
+        }
 
-        .date-range-group { display: flex; align-items: center; gap: 8px; background: #161922; padding: 4px 12px; border-radius: 20px; border: 1px solid #262b38; }
-        .date-input { background: transparent; border: none; color: #e5e7eb; font-size: 12px; padding: 4px; outline: none; }
+        .filter-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .filter-pill {
+            background: #161922;
+            color: #9ca3af;
+            border: 1px solid #262b38;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .filter-pill:hover,
+        .filter-pill.active {
+            background: #3b82f6;
+            color: #ffffff;
+            border-color: #3b82f6;
+        }
+
+        .filter-pill.live-pill {
+            background: rgba(16, 185, 129, 0.1);
+            color: #10b981;
+            border-color: rgba(16, 185, 129, 0.3);
+        }
+
+        .date-range-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: #161922;
+            padding: 4px 12px;
+            border-radius: 20px;
+            border: 1px solid #262b38;
+        }
+
+        .date-input {
+            background: transparent;
+            border: none;
+            color: #e5e7eb;
+            font-size: 12px;
+            padding: 4px;
+            outline: none;
+        }
 
         /* Summary Analytics Grid Card */
-        .summary-card { background: #161922; border-radius: 16px; border: 1px solid #262b38; padding: 24px; margin-bottom: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
-        .channel-header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #262b38; }
-        .channel-header-title { font-size: 16px; font-weight: 800; color: #ffffff; display: flex; align-items: center; gap: 10px; }
-        .channel-header-status { background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 700; }
-        
-        .main-unit-header { margin-bottom: 20px; }
-        .unit-label { font-size: 12px; font-weight: 700; color: #6b7280; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 6px; }
-        .unit-value { font-size: 42px; font-weight: 900; color: #10b981; }
+        .summary-card {
+            background: #161922;
+            border-radius: 16px;
+            border: 1px solid #262b38;
+            padding: 24px;
+            margin-bottom: 24px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
 
-        .metrics-grid-4col { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; border-top: 1px solid #262b38; padding-top: 20px; }
-        .sub-metric-item { display: flex; flex-direction: column; gap: 4px; }
-        .sub-metric-label { font-size: 11px; font-weight: 700; color: #6b7280; letter-spacing: 0.5px; text-transform: uppercase; }
-        .sub-metric-val { font-size: 20px; font-weight: 800; color: #ffffff; }
-        .sub-metric-val.green { color: #10b981; }
-        .sub-metric-val.red { color: #ef4444; }
-        .sub-metric-subtext { font-size: 11px; color: #6b7280; }
+        .channel-header-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #262b38;
+        }
+
+        .channel-header-title {
+            font-size: 16px;
+            font-weight: 800;
+            color: #ffffff;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .channel-header-status {
+            background: rgba(16, 185, 129, 0.15);
+            color: #10b981;
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 700;
+        }
+
+        .main-unit-header {
+            margin-bottom: 20px;
+        }
+
+        .unit-label {
+            font-size: 12px;
+            font-weight: 700;
+            color: #6b7280;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            margin-bottom: 6px;
+        }
+
+        .unit-value {
+            font-size: 42px;
+            font-weight: 900;
+            color: #10b981;
+        }
+
+        .metrics-grid-4col {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 20px;
+            border-top: 1px solid #262b38;
+            padding-top: 20px;
+        }
+
+        .sub-metric-item {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .sub-metric-label {
+            font-size: 11px;
+            font-weight: 700;
+            color: #6b7280;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        .sub-metric-val {
+            font-size: 20px;
+            font-weight: 800;
+            color: #ffffff;
+        }
+
+        .sub-metric-val.green {
+            color: #10b981;
+        }
+
+        .sub-metric-val.red {
+            color: #ef4444;
+        }
+
+        .sub-metric-subtext {
+            font-size: 11px;
+            color: #6b7280;
+        }
 
         /* Charts Container */
-        .charts-container { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px; }
-        @media (max-width: 992px) { .charts-container { grid-template-columns: 1fr; } }
-        .chart-box { background: #161922; border-radius: 16px; border: 1px solid #262b38; padding: 20px; }
-        .chart-header { font-size: 13px; font-weight: 800; color: #ffffff; letter-spacing: 0.5px; text-transform: uppercase; margin-bottom: 16px; }
-        .chart-wrapper { position: relative; height: 260px; width: 100%; }
+        .charts-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+            margin-bottom: 24px;
+        }
+
+        @media (max-width: 992px) {
+            .charts-container {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .chart-box {
+            background: #161922;
+            border-radius: 16px;
+            border: 1px solid #262b38;
+            padding: 20px;
+        }
+
+        .chart-header {
+            font-size: 13px;
+            font-weight: 800;
+            color: #ffffff;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            margin-bottom: 16px;
+        }
+
+        .chart-wrapper {
+            position: relative;
+            height: 260px;
+            width: 100%;
+        }
 
         /* Tables & Section Boxes */
-        .section-box { background: #161922; border-radius: 16px; border: 1px solid #262b38; padding: 20px; margin-bottom: 24px; }
-        .section-title { font-size: 14px; font-weight: 800; color: #ffffff; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; display: flex; align-items: center; justify-content: space-between; }
-        .section-subtitle { font-size: 11px; color: #6b7280; margin-bottom: 16px; line-height: 1.4; }
+        .section-box {
+            background: #161922;
+            border-radius: 16px;
+            border: 1px solid #262b38;
+            padding: 20px;
+            margin-bottom: 24px;
+        }
 
-        .table-responsive { overflow-x: auto; }
+        .section-title {
+            font-size: 14px;
+            font-weight: 800;
+            color: #ffffff;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .section-subtitle {
+            font-size: 11px;
+            color: #6b7280;
+            margin-bottom: 16px;
+            line-height: 1.4;
+        }
+
+        .table-responsive {
+            overflow-x: auto;
+        }
+
         .table-scroll-container {
             max-height: 520px;
             overflow-y: auto;
@@ -66,20 +308,25 @@
             border: 1px solid #262b38;
             border-radius: 8px;
         }
+
         .table-scroll-container::-webkit-scrollbar {
             width: 8px;
             height: 8px;
         }
+
         .table-scroll-container::-webkit-scrollbar-track {
             background: #161922;
         }
+
         .table-scroll-container::-webkit-scrollbar-thumb {
             background: #262b38;
             border-radius: 4px;
         }
+
         .table-scroll-container::-webkit-scrollbar-thumb:hover {
             background: #374151;
         }
+
         .table-scroll-container thead th {
             position: sticky;
             top: 0;
@@ -87,6 +334,7 @@
             background: #1f2430;
             box-shadow: 0 1px 0 #262b38;
         }
+
         .custom-section-select {
             background: #1f2430;
             color: #e5e7eb;
@@ -99,27 +347,98 @@
             outline: none;
             transition: border-color 0.2s, background 0.2s;
         }
-        .custom-section-select:hover, .custom-section-select:focus {
+
+        .custom-section-select:hover,
+        .custom-section-select:focus {
             border-color: #3b82f6;
             background: #262b38;
         }
 
-        .data-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; }
-        .data-table th { background: #1f2430; color: #9ca3af; font-weight: 700; padding: 10px 12px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #262b38; }
-        .data-table td { padding: 12px; border-bottom: 1px solid #1f2430; color: #e5e7eb; }
-        .data-table tr:hover td { background: #1a1e29; }
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 12px;
+        }
+
+        .data-table th {
+            background: #1f2430;
+            color: #9ca3af;
+            font-weight: 700;
+            padding: 10px 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid #262b38;
+        }
+
+        .data-table td {
+            padding: 12px;
+            border-bottom: 1px solid #1f2430;
+            color: #e5e7eb;
+        }
+
+        .data-table tr:hover td {
+            background: #1a1e29;
+        }
 
         /* Badges */
-        .badge-published { background: rgba(16, 185, 129, 0.1); color: #10b981; padding: 3px 8px; border-radius: 4px; font-weight: 600; font-size: 11px; }
-        .badge-filtered { background: rgba(239, 68, 68, 0.1); color: #ef4444; padding: 3px 8px; border-radius: 4px; font-weight: 600; font-size: 11px; }
-        .badge-live { background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); padding: 2px 6px; border-radius: 4px; font-weight: 700; font-size: 10px; }
-        .btn-bet-link { background: #2563eb; color: #ffffff; text-decoration: none; padding: 4px 8px; border-radius: 4px; font-weight: 600; font-size: 11px; display: inline-block; }
-        .btn-bet-link:hover { background: #1d4ed8; }
+        .badge-published {
+            background: rgba(16, 185, 129, 0.1);
+            color: #10b981;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+            font-size: 11px;
+        }
 
-        .two-col-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
-        @media (max-width: 900px) { .two-col-grid { grid-template-columns: 1fr; } }
+        .badge-filtered {
+            background: rgba(239, 68, 68, 0.1);
+            color: #ef4444;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+            font-size: 11px;
+        }
+
+        .badge-live {
+            background: rgba(16, 185, 129, 0.15);
+            color: #10b981;
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 700;
+            font-size: 10px;
+        }
+
+        .btn-bet-link {
+            background: #2563eb;
+            color: #ffffff;
+            text-decoration: none;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+            font-size: 11px;
+            display: inline-block;
+        }
+
+        .btn-bet-link:hover {
+            background: #1d4ed8;
+        }
+
+        .two-col-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+        }
+
+        @media (max-width: 900px) {
+            .two-col-grid {
+                grid-template-columns: 1fr;
+            }
+        }
     </style>
 </head>
+
 <body>
 
     <!-- Top Navigation Bar -->
@@ -137,9 +456,12 @@
         <div class="filter-group" id="channel-tabs">
             <button class="filter-pill active" onclick="switchChannel('all', this)">All (Master View)</button>
             <button class="filter-pill" onclick="switchChannel('fifa_goals_ou', this)">FIFA Goals O/U • LIVE 🟢</button>
-            <button class="filter-pill" onclick="switchChannel('fifa_asian_handicap', this)">FIFA Asian Handicap • LIVE 🟢</button>
-            <button class="filter-pill" onclick="switchChannel('fifa_money_line', this)">FIFA Money Line • LIVE 🟢</button>
-            <button class="filter-pill" onclick="switchChannel('ebasket_money_line', this)">eBasketball Money Line • LIVE 🟢</button>
+            <button class="filter-pill" onclick="switchChannel('fifa_asian_handicap', this)">FIFA Asian Handicap • LIVE
+                🟢</button>
+            <button class="filter-pill" onclick="switchChannel('fifa_money_line', this)">FIFA Money Line • LIVE
+                🟢</button>
+            <button class="filter-pill" onclick="switchChannel('ebasket_money_line', this)">eBasketball Money Line •
+                LIVE 🟢</button>
             <button class="filter-pill" onclick="switchChannel('ebasket_ou', this)">eBasketball O/U • LIVE 🟢</button>
         </div>
 
@@ -149,7 +471,7 @@
             <button class="filter-pill" onclick="setDateFilter('today', this)">Today</button>
             <button class="filter-pill" onclick="setDateFilter('7d', this)">7 days</button>
             <button class="filter-pill" onclick="setDateFilter('14d', this)">14 days</button>
-            
+
             <div class="date-range-group">
                 <input type="date" id="date-start" class="date-input" onchange="triggerCustomFilter()">
                 <span style="color:#6b7280;">→</span>
@@ -254,7 +576,8 @@
             <span class="badge-live">DADOS RECONCILIADOS</span>
         </div>
         <div class="section-subtitle">
-            Métricas de desempenho calculadas por mercado para o período selecionado. Dados sincronizados com o relatório diário e mensal oficial.
+            Métricas de desempenho calculadas por mercado para o período selecionado. Dados sincronizados com o
+            relatório diário e mensal oficial.
         </div>
         <div class="table-responsive">
             <table class="data-table">
@@ -278,7 +601,10 @@
                     </tr>
                 </thead>
                 <tbody id="tbody-market-breakdown">
-                    <tr><td colspan="15" style="text-align:center;color:#6b7280;padding:16px;">Carregando métricas de mercados...</td></tr>
+                    <tr>
+                        <td colspan="15" style="text-align:center;color:#6b7280;padding:16px;">Carregando métricas de
+                            mercados...</td>
+                    </tr>
                 </tbody>
             </table>
         </div>
@@ -291,7 +617,8 @@
             <div class="section-title">
                 <span>MOST PROFITABLE PLAYERS</span>
             </div>
-            <div class="section-subtitle">Estatísticas históricas de jogadores mais lucrativos no período (mínimo de 3 tips). Uso estritamente analítico.</div>
+            <div class="section-subtitle">Estatísticas históricas de jogadores mais lucrativos no período (mínimo de 3
+                tips). Uso estritamente analítico.</div>
             <div class="table-responsive">
                 <table class="data-table">
                     <thead>
@@ -304,7 +631,9 @@
                         </tr>
                     </thead>
                     <tbody id="tbody-top-players">
-                        <tr><td colspan="5" style="text-align:center;color:#6b7280;">Carregando estatísticas...</td></tr>
+                        <tr>
+                            <td colspan="5" style="text-align:center;color:#6b7280;">Carregando estatísticas...</td>
+                        </tr>
                     </tbody>
                 </table>
             </div>
@@ -315,7 +644,8 @@
             <div class="section-title">
                 <span>PLAYERS TO MONITOR / UNDERPERFORMING</span>
             </div>
-            <div class="section-subtitle">Jogadores com histórico desfavorável sob observação estatística. Não constitui recomendação automatizada.</div>
+            <div class="section-subtitle">Jogadores com histórico desfavorável sob observação estatística. Não constitui
+                recomendação automatizada.</div>
             <div class="table-responsive">
                 <table class="data-table">
                     <thead>
@@ -328,7 +658,9 @@
                         </tr>
                     </thead>
                     <tbody id="tbody-avoid-players">
-                        <tr><td colspan="5" style="text-align:center;color:#6b7280;">Carregando estatísticas...</td></tr>
+                        <tr>
+                            <td colspan="5" style="text-align:center;color:#6b7280;">Carregando estatísticas...</td>
+                        </tr>
                     </tbody>
                 </table>
             </div>
@@ -341,7 +673,8 @@
             <span>UNDER VALIDATION (DRY RUN - NOT SENT TO CHANNEL)</span>
         </div>
         <div class="section-subtitle">
-            Signals and leagues measured by the system without publishing. Only included in the product after passing historical and live validation — results here are experimental, not active tips.
+            Signals and leagues measured by the system without publishing. Only included in the product after passing
+            historical and live validation — results here are experimental, not active tips.
         </div>
         <div class="table-responsive">
             <table class="data-table">
@@ -356,7 +689,9 @@
                     </tr>
                 </thead>
                 <tbody id="tbody-validation">
-                    <tr><td colspan="6" style="text-align:center;color:#6b7280;">Carregando sinais experimentais...</td></tr>
+                    <tr>
+                        <td colspan="6" style="text-align:center;color:#6b7280;">Carregando sinais experimentais...</td>
+                    </tr>
                 </tbody>
             </table>
         </div>
@@ -364,16 +699,19 @@
 
     <!-- Latest Dispatched Tips Table -->
     <div class="section-box">
-        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 8px;">
+        <div
+            style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 8px;">
             <div class="section-title" style="margin-bottom: 0;">
                 <span id="tips-table-header">ÚLTIMAS TIPS ENVIADAS (HORÁRIO DE BRASÍLIA - BRT)</span>
             </div>
-            
+
             <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
                 <!-- Channel / Market Filter Dropdown: Admins do not need to scroll to top to filter -->
                 <div style="display: flex; align-items: center; gap: 6px;">
-                    <label for="tips-market-select" style="font-size: 11px; font-weight: 700; color: #9ca3af; text-transform: uppercase;">Mercado:</label>
-                    <select id="tips-market-select" class="custom-section-select" onchange="onTipsMarketChange(this.value)">
+                    <label for="tips-market-select"
+                        style="font-size: 11px; font-weight: 700; color: #9ca3af; text-transform: uppercase;">Mercado:</label>
+                    <select id="tips-market-select" class="custom-section-select"
+                        onchange="onTipsMarketChange(this.value)">
                         <option value="all" selected>All (Master View)</option>
                         <option value="fifa_goals_ou">FIFA Goals O/U</option>
                         <option value="fifa_asian_handicap">FIFA Asian Handicap</option>
@@ -385,8 +723,10 @@
 
                 <!-- Display Limit Dropdown -->
                 <div style="display: flex; align-items: center; gap: 6px;">
-                    <label for="tips-limit-select" style="font-size: 11px; font-weight: 700; color: #9ca3af; text-transform: uppercase;">Exibir:</label>
-                    <select id="tips-limit-select" class="custom-section-select" onchange="onTipsLimitChange(this.value)">
+                    <label for="tips-limit-select"
+                        style="font-size: 11px; font-weight: 700; color: #9ca3af; text-transform: uppercase;">Exibir:</label>
+                    <select id="tips-limit-select" class="custom-section-select"
+                        onchange="onTipsLimitChange(this.value)">
                         <option value="25">25 tips</option>
                         <option value="50">50 tips</option>
                         <option value="100" selected>100 tips</option>
@@ -421,7 +761,9 @@
                     </tr>
                 </thead>
                 <tbody id="tbody-tips">
-                    <tr><td colspan="13" style="text-align:center;color:#6b7280;padding:20px;">Carregando tips...</td></tr>
+                    <tr>
+                        <td colspan="13" style="text-align:center;color:#6b7280;padding:20px;">Carregando tips...</td>
+                    </tr>
                 </tbody>
             </table>
         </div>
@@ -491,7 +833,7 @@
 
         window.addEventListener('DOMContentLoaded', () => {
             initApp();
-            
+
             // Non-blocking auto-refresh interval (25s), only runs if page is active
             setInterval(() => {
                 if (!document.hidden && !isFetching) {
@@ -510,7 +852,7 @@
         function refreshDataFast() {
             if (isFetching) return;
             isFetching = true;
-            
+
             Promise.all([
                 fetchAnalytics(),
                 fetchChartsData(),
@@ -601,10 +943,10 @@
                 worstEl.innerText = a.worst_day;
                 if (a.has_losing_day === false || (a.worst_day && a.worst_day.startsWith('+'))) {
                     worstEl.className = "sub-metric-val green";
-                    if (worstSub) worstSub.innerText = "Menor ganho di?rio (100% dias positivos)";
+                    if (worstSub) worstSub.innerText = "Menor ganho dirio (100% dias positivos)";
                 } else {
                     worstEl.className = "sub-metric-val red";
-                    if (worstSub) worstSub.innerText = "Maior perda di?ria";
+                    if (worstSub) worstSub.innerText = "Maior perda diria";
                 }
             } catch (err) {
                 console.error("Error fetching analytics:", err);
@@ -677,7 +1019,7 @@
                         legend: { display: false },
                         tooltip: {
                             callbacks: {
-                                label: function(context) {
+                                label: function (context) {
                                     return (context.raw >= 0 ? '+' : '') + context.raw + ' Units';
                                 }
                             }
@@ -733,7 +1075,7 @@
                         legend: { display: false },
                         tooltip: {
                             callbacks: {
-                                label: function(context) {
+                                label: function (context) {
                                     return (context.raw >= 0 ? '+' : '') + context.raw + ' Units';
                                 }
                             }
@@ -865,7 +1207,7 @@
 
                 // Update count in header
                 const total = data.total_count || data.tips.length;
-                document.getElementById('tips-table-subtitle').innerText = 
+                document.getElementById('tips-table-subtitle').innerText =
                     `Exibindo as ${data.tips.length} tips mais recentes (total de ${total} registradas) com status de liquidação e verificação de links.`;
 
                 const rows = [];
@@ -913,4 +1255,5 @@
         }
     </script>
 </body>
+
 </html>
