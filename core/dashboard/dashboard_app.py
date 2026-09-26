@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import hashlib
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional, Tuple
@@ -172,7 +173,7 @@ def load_reconciled_live_tips() -> List[Dict[str, Any]]:
                     "result": outcome,
                     "outcome": outcome,
                     "delivery_status": "PUBLISHED",
-                    "match_link": f"https://www.bet365.bet.br/#/IP/EV{m_id}" if m_id else "https://www.bet365.bet.br/",
+                    "match_link": f"https://www.bet365.com/#/IP/EV{m_id}" if m_id else "https://www.bet365.com/",
                     "net_units": net_u
                 }
         except Exception as e:
@@ -218,7 +219,7 @@ def load_reconciled_live_tips() -> List[Dict[str, Any]]:
                             "result": outcome,
                             "outcome": outcome,
                             "delivery_status": "PUBLISHED",
-                            "match_link": f"https://www.bet365.bet.br/#/IP/EV{m_id}" if m_id else "https://www.bet365.bet.br/",
+                            "match_link": f"https://www.bet365.com/#/IP/EV{m_id}" if m_id else "https://www.bet365.com/",
                             "net_units": net_u
                         }
         except Exception as db_err:
@@ -276,7 +277,7 @@ def load_reconciled_live_tips() -> List[Dict[str, Any]]:
                     "result": "PENDING",
                     "outcome": "PENDING",
                     "delivery_status": "PUBLISHED",
-                    "match_link": f"https://www.bet365.bet.br/#/IP/EV{m_id}" if m_id else "https://www.bet365.bet.br/",
+                    "match_link": f"https://www.bet365.com/#/IP/EV{m_id}" if m_id else "https://www.bet365.com/",
                     "net_units": 0.0
                 }
         except Exception as e:
@@ -313,6 +314,9 @@ def load_reconciled_live_tips() -> List[Dict[str, Any]]:
                 elif res in ["HALF_LOSS", "HALF LOST"]:
                     net_u = -0.5
 
+                raw_ml = item.get("match_link", "https://www.bet365.com/")
+                clean_ml = str(raw_ml).replace("www.bet365.bet.br", "www.bet365.com").replace("bet365.bet.br", "bet365.com")
+
                 all_tips_map[unique_key] = {
                     "match_id": m_id or None,
                     "channel_key": ch_key,
@@ -330,7 +334,7 @@ def load_reconciled_live_tips() -> List[Dict[str, Any]]:
                     "link_status": item.get("link_status", "VALID BET365 LINK"),
                     "result": res,
                     "delivery_status": item.get("delivery_status", "PUBLISHED"),
-                    "match_link": item.get("match_link", "https://www.bet365.bet.br/"),
+                    "match_link": clean_ml,
                     "net_units": net_u
                 }
         except Exception as e:
@@ -558,7 +562,21 @@ def compute_dashboard_analytics_and_charts(
 
     longest_streak_desc = f"{max_win_streak}W / {max_loss_streak}L"
 
+    now_brt = datetime.now(BRT_TZ)
+    as_of_str = now_brt.strftime("%Y-%m-%d %H:%M:%S BRT")
+    date_range_str = f"{sorted_dates[0]} to {sorted_dates[-1]}" if sorted_dates else "All Historical Data"
+    ch_tag = PROD_CHANNELS[target_channel]["aliases"][0][:4].upper() if target_channel in PROD_CHANNELS else "ALL"
+    run_hash = hashlib.sha256(f"{target_channel}:{date_range_str}:{now_brt.strftime('%Y%m%d%H')}".encode()).hexdigest()[:8].upper()
+    report_run_id = f"RUN-{now_brt.strftime('%Y%m%d')}-{ch_tag}-{run_hash}"
+    rec_status = "FINAL" if pending_count == 0 else f"PROVISIONAL ({pending_count} pending)"
+
     analytics_data = {
+        "report_run_id": report_run_id,
+        "as_of_brt": as_of_str,
+        "date_range": date_range_str,
+        "channel": target_channel,
+        "reconciliation_status": rec_status,
+        "status_type": "FINAL" if pending_count == 0 else "PROVISIONAL",
         "channel_name": PROD_CHANNELS[target_channel]["name"] if target_channel in PROD_CHANNELS else "All Channels (Master View)",
         "channel_status": PROD_CHANNELS[target_channel]["status"] if target_channel in PROD_CHANNELS else "LIVE",
         "accumulated_units": f"{sign_units}{total_units:.2f}u",
@@ -851,7 +869,7 @@ async def get_tips_table(
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     all_tips = get_cached_reconciled_live_tips()
-    _, _, _, _, target_tips = compute_dashboard_analytics_and_charts(channel_id, filter_days, from_date, to_date, all_tips=all_tips)
+    analytics_data, _, _, _, target_tips = compute_dashboard_analytics_and_charts(channel_id, filter_days, from_date, to_date, all_tips=all_tips)
     
     total_count = len(target_tips)
     if limit and limit > 0:
@@ -859,4 +877,80 @@ async def get_tips_table(
     else:
         display_tips = target_tips[:100]
 
-    return {"tips": display_tips, "total_count": total_count}
+    metadata = {
+        "report_run_id": analytics_data.get("report_run_id"),
+        "as_of_brt": analytics_data.get("as_of_brt"),
+        "date_range": analytics_data.get("date_range"),
+        "channel": PROD_CHANNELS[channel_id]["name"] if channel_id in PROD_CHANNELS else "All Channels (Master View)",
+        "channel_key": channel_id,
+        "status": analytics_data.get("status_type", "FINAL"),
+        "reconciliation_status": analytics_data.get("reconciliation_status")
+    }
+
+    return {"metadata": metadata, "tips": display_tips, "total_count": total_count}
+
+
+@app.get("/api/export")
+async def export_tips_data(
+    request: Request,
+    channel_id: Optional[str] = "all",
+    filter_days: Optional[str] = "all",
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    format: Optional[str] = "json"
+):
+    """
+    Exports filtered reconciled tips and comprehensive snapshot audit metadata.
+    """
+    if not is_authenticated(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    all_tips = get_cached_reconciled_live_tips()
+    analytics_data, _, _, _, target_tips = compute_dashboard_analytics_and_charts(channel_id, filter_days, from_date, to_date, all_tips=all_tips)
+
+    metadata = {
+        "report_run_id": analytics_data.get("report_run_id"),
+        "as_of_brt": analytics_data.get("as_of_brt"),
+        "date_range": analytics_data.get("date_range"),
+        "channel": PROD_CHANNELS[channel_id]["name"] if channel_id in PROD_CHANNELS else "All Channels (Master View)",
+        "channel_key": channel_id,
+        "status": analytics_data.get("status_type", "FINAL"),
+        "reconciliation_status": analytics_data.get("reconciliation_status")
+    }
+
+    if format.lower() == "csv":
+        import io
+        import csv
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["# Report-Run ID", metadata["report_run_id"]])
+        writer.writerow(["# As of (BRT)", metadata["as_of_brt"]])
+        writer.writerow(["# Date Range", metadata["date_range"]])
+        writer.writerow(["# Channel", metadata["channel"]])
+        writer.writerow(["# Status", metadata["status"]])
+        writer.writerow([])
+        writer.writerow(["Match ID", "Channel", "Date (BRT)", "Settled At (BRT)", "Fixture", "Pick", "Odds", "Result", "Net Units", "Link"])
+        for t in target_tips:
+            writer.writerow([
+                t.get("match_id", ""),
+                t.get("channel_key", ""),
+                t.get("date_brt", ""),
+                t.get("settled_at_brt", ""),
+                t.get("fixture", ""),
+                t.get("pick", ""),
+                t.get("odds", ""),
+                t.get("result", ""),
+                t.get("net_units", 0.0),
+                t.get("match_link", "")
+            ])
+        return HTMLResponse(content=output.getvalue(), media_type="text/csv", headers={
+            "Content-Disposition": f"attachment; filename=mario_export_{channel_id}_{datetime.now(BRT_TZ).strftime('%Y%m%d_%H%M%S')}.csv"
+        })
+
+    return {
+        "metadata": metadata,
+        "summary": analytics_data,
+        "total_records": len(target_tips),
+        "tips": target_tips
+    }
+

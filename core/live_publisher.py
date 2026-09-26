@@ -30,12 +30,20 @@ sys.path.insert(0, ".")
 from core.config.settings import settings
 from core.ingestion.jarbet_client import JarBetClient
 from core.dashboard.dashboard_app import app
-from markets.fifa_goals_ou.features import build_fifa_goals_ou_features
-from markets.fifa_asian_handicap.v3_multiline_kelly_filtering.features import build_fifa_ah_v3_features
-from markets.fifa_money_line.v3_dnb_synthetic_features.features import build_fifa_ml_v3_features
-from markets.ebasket_money_line.v3_dnb_synthetic_features.features import build_ebasket_ml_v3_features
-from markets.ebasket_ou.v3_multiline_kelly_filtering.features import build_ebasket_ou_v3_features
-from markets._shared.multiline_v3_features import calculate_quarter_kelly_stake
+try:
+    from markets.fifa_goals_ou.features import build_fifa_goals_ou_features
+    from markets.fifa_asian_handicap.v3_multiline_kelly_filtering.features import build_fifa_ah_v3_features
+    from markets.fifa_money_line.v3_dnb_synthetic_features.features import build_fifa_ml_v3_features
+    from markets.ebasket_money_line.v3_dnb_synthetic_features.features import build_ebasket_ml_v3_features
+    from markets.ebasket_ou.v3_multiline_kelly_filtering.features import build_ebasket_ou_v3_features
+    from markets._shared.multiline_v3_features import calculate_quarter_kelly_stake
+except ImportError:
+    build_fifa_goals_ou_features = None
+    build_fifa_ah_v3_features = None
+    build_fifa_ml_v3_features = None
+    build_ebasket_ml_v3_features = None
+    build_ebasket_ou_v3_features = None
+    calculate_quarter_kelly_stake = None
 
 BRT_TZ = timezone(timedelta(hours=-3))
 LIVE_AUDIT_LOG_LIST = []
@@ -660,7 +668,7 @@ def send_telegram_tip(bot_token: str, channel_id: str, message_text: str, channe
                         odds_val = line.replace("Odds:", "").strip()
 
                 m_name = "eBasketball Over/Under" if "Points" in bet_val or "Pontos" in bet_val else ("eBasketball Money Line" if "ebasket" in league_val.lower() else ("FIFA Goals Over/Under" if "Gols" in bet_val or "Goals" in bet_val else "FIFA Asian Handicap"))
-                record_live_audit_item(m_name, fixture_val or "Live Fixture", bet_val or "Selection", odds_val or "1.90", "60.0%", "+14.2%", "1.00 Unit", link_val or "https://www.bet365.bet.br/", "PUBLISHED", "PENDING")
+                record_live_audit_item(m_name, fixture_val or "Live Fixture", bet_val or "Selection", odds_val or "1.90", "60.0%", "+14.2%", "1.00 Unit", link_val or "https://www.bet365.com/", "PUBLISHED", "PENDING")
             except Exception as audit_err:
                 logger.warning(f"Audit log recording error: {audit_err}")
 
@@ -808,14 +816,14 @@ def validate_and_extract_direct_link(match_row: Dict[str, Any], match_url: Optio
     if raw_url:
         s_url = str(raw_url).strip()
         if s_url.startswith("http://") or s_url.startswith("https://"):
-            s_url = s_url.replace("www.bet365.bet.br", "www.bet365.bet.br").replace("bet365.com", "bet365.bet.br")
+            s_url = s_url.replace("www.bet365.bet.br", "www.bet365.com").replace("bet365.bet.br", "bet365.com")
             return s_url, True
         if s_url.startswith("/"):
-            return f"https://www.bet365.bet.br/#{s_url}", True
+            return f"https://www.bet365.com/#{s_url}", True
 
     b365_id = match_row.get("match_id") or raw_payload.get("idMatchBet365") or raw_payload.get("_id")
     if b365_id:
-        return f"https://www.bet365.bet.br/#/IP/EV{b365_id}", True
+        return f"https://www.bet365.com/#/IP/EV{b365_id}", True
 
     return None, False
 
@@ -1336,7 +1344,7 @@ def load_all_tip_history() -> List[Dict[str, Any]]:
                 "link_status": "VALID BET365 LINK",
                 "result": res_status,
                 "delivery_status": "PUBLISHED",
-                "match_link": f"https://www.bet365.bet.br/#/IP/EV{m_id}",
+                "match_link": f"https://www.bet365.com/#/IP/EV{m_id}",
                 "match_id": m_id
             })
 
@@ -1371,7 +1379,7 @@ def record_live_audit_item(market_name: str, fixture: str, pick: str, odds: str,
         "link_status": "VALID BET365 LINK" if match_link and "bet365" in match_link else "FLAGGED / INVALID",
         "result": result,
         "delivery_status": delivery_status,
-        "match_link": match_link or "https://www.bet365.bet.br/",
+        "match_link": match_link or "https://www.bet365.com/",
         "match_id": str(match_id) if match_id else None
     }
 
@@ -1892,13 +1900,13 @@ def run_live_publisher_cycle(bot_token: Optional[str] = None):
 
         raw_url = match.get("url") or match.get("link")
         if raw_url and str(raw_url).startswith("/"):
-            link_url = f"https://www.bet365.bet.br#{raw_url}"
+            link_url = f"https://www.bet365.com#{raw_url}"
         elif raw_url and str(raw_url).startswith("http"):
-            link_url = str(raw_url)
+            link_url = str(raw_url).replace("www.bet365.bet.br", "www.bet365.com").replace("bet365.bet.br", "bet365.com")
         elif match_id:
-            link_url = f"https://www.bet365.bet.br/#/IP/EV{match_id}"
+            link_url = f"https://www.bet365.com/#/IP/EV{match_id}"
         else:
-            link_url = "https://www.bet365.bet.br/"
+            link_url = "https://www.bet365.com/"
 
         odds_dict = match.get("odds", {}) if isinstance(match.get("odds"), dict) else {}
 

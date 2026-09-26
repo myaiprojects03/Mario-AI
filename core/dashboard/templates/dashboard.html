@@ -486,9 +486,23 @@
             <div class="channel-header-title" id="selected-channel-title">
                 All Channels (Master View)
             </div>
-            <div class="channel-header-status" id="selected-channel-status">
-                LIVE 🟢
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <div id="selected-channel-rec-status" style="background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 700;">
+                    FINAL
+                </div>
+                <div class="channel-header-status" id="selected-channel-status">
+                    LIVE 🟢
+                </div>
             </div>
+        </div>
+
+        <!-- Snapshot Metadata Audit Bar -->
+        <div style="display: flex; flex-wrap: wrap; gap: 16px; background: #12141c; padding: 10px 14px; border-radius: 8px; border: 1px solid #262b38; margin-bottom: 20px; font-size: 11px; color: #9ca3af;">
+            <div><strong style="color: #6b7280;">Report-Run ID:</strong> <span id="meta-run-id" style="color: #60a5fa; font-family: monospace; font-weight: 600;">-</span></div>
+            <div><strong style="color: #6b7280;">As of (BRT):</strong> <span id="meta-as-of" style="color: #e5e7eb; font-weight: 600;">-</span></div>
+            <div><strong style="color: #6b7280;">Date Range:</strong> <span id="meta-date-range" style="color: #e5e7eb; font-weight: 600;">-</span></div>
+            <div><strong style="color: #6b7280;">Channel:</strong> <span id="meta-channel" style="color: #e5e7eb; font-weight: 600;">-</span></div>
+            <div><strong style="color: #6b7280;">Status:</strong> <span id="meta-status" style="color: #10b981; font-weight: 700;">FINAL</span></div>
         </div>
 
         <div class="main-unit-header">
@@ -918,6 +932,26 @@
 
                 document.getElementById('selected-channel-title').innerText = a.channel_name;
                 document.getElementById('selected-channel-status').innerText = a.channel_status + ' 🟢';
+
+                // Populate Snapshot Audit Metadata
+                if (document.getElementById('meta-run-id')) {
+                    document.getElementById('meta-run-id').innerText = a.report_run_id || 'RUN-LIVE-PROD';
+                    document.getElementById('meta-as-of').innerText = a.as_of_brt || '-';
+                    document.getElementById('meta-date-range').innerText = a.date_range || 'All';
+                    document.getElementById('meta-channel').innerText = a.channel_name || 'All Channels';
+                    const metaStatus = document.getElementById('meta-status');
+                    const badgeRec = document.getElementById('selected-channel-rec-status');
+                    if (metaStatus) {
+                        metaStatus.innerText = a.reconciliation_status || 'FINAL';
+                        metaStatus.style.color = (a.reconciliation_status && a.reconciliation_status.includes('PROVISIONAL')) ? '#60a5fa' : '#10b981';
+                    }
+                    if (badgeRec) {
+                        badgeRec.innerText = a.status_type || 'FINAL';
+                        badgeRec.style.color = (a.status_type === 'PROVISIONAL') ? '#60a5fa' : '#10b981';
+                        badgeRec.style.borderColor = (a.status_type === 'PROVISIONAL') ? 'rgba(59, 130, 246, 0.3)' : 'rgba(16, 185, 129, 0.3)';
+                        badgeRec.style.background = (a.status_type === 'PROVISIONAL') ? 'rgba(59, 130, 246, 0.15)' : 'rgba(16, 185, 129, 0.15)';
+                    }
+                }
 
                 const valUnits = document.getElementById('val-accumulated-units');
                 valUnits.innerText = a.accumulated_units;
