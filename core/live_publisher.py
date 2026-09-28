@@ -911,6 +911,25 @@ def ensure_persistence_tables():
                     published_at_brt TIMESTAMP WITH TIME ZONE,
                     PRIMARY KEY (date_brt, channel_key, match_id)
                 );
+                CREATE TABLE IF NOT EXISTS core.tip_audit_log (
+                    id SERIAL PRIMARY KEY,
+                    match_id VARCHAR(64),
+                    channel_key VARCHAR(32),
+                    fixture VARCHAR(256),
+                    pick_str VARCHAR(128),
+                    odds NUMERIC(6, 3),
+                    est_prob VARCHAR(16),
+                    edge VARCHAR(16),
+                    stake VARCHAR(32),
+                    eligible_at_brt TIMESTAMP WITH TIME ZONE,
+                    kickoff_at_brt TIMESTAMP WITH TIME ZONE,
+                    dispatched_at_brt TIMESTAMP WITH TIME ZONE,
+                    status VARCHAR(32),
+                    reason_code VARCHAR(64),
+                    reason_details TEXT,
+                    match_link TEXT,
+                    created_at_brt TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
             """)
             conn.commit()
             return True
@@ -1394,6 +1413,315 @@ def record_live_audit_item(market_name: str, fixture: str, pick: str, odds: str,
         logger.warning(f"Error saving live_audit_log.json: {ex}")
 
 
+def parse_match_kickoff_time(match: Dict[str, Any]) -> Optional[datetime]:
+    """Extracts and parses kickoff timestamp from various API match schema formats."""
+    raw = match.get("startedAt") or match.get("startTime") or match.get("match_time") or match.get("createdAt") or match.get("timestamp")
+    if not raw:
+        return None
+    if isinstance(raw, (int, float)):
+        if raw > 1e11:  # milliseconds
+            return datetime.fromtimestamp(raw / 1000.0, tz=timezone.utc)
+        return datetime.fromtimestamp(raw, tz=timezone.utc)
+    try:
+        s = str(raw).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def record_tip_audit_event(
+    match_id: str,
+    channel_key: str,
+    fixture: str,
+    pick_str: str,
+    odds_val: float,
+    est_prob_str: str,
+    edge_str: str,
+    stake: str,
+    eligible_at_brt: datetime,
+    kickoff_at_brt: Optional[datetime],
+    dispatched_at_brt: Optional[datetime],
+    status: str,
+    reason_code: str,
+    reason_details: str,
+    match_link: str
+):
+    """
+    Dual-persistence recording for all tip audit events (PostgreSQL core.tip_audit_log + live_audit_log.json).
+    Records delivered, expired, cancelled, and rejected candidate tips.
+    """
+    # 1. Update in-memory / JSON audit log
+    record_live_audit_item(
+        market_name=CHANNEL_TITLES.get(channel_key, channel_key),
+        fixture=fixture,
+        pick=pick_str,
+        odds=f"{odds_val:.2f}",
+        est_prob=est_prob_str,
+        edge=edge_str,
+        stake=stake,
+        match_link=match_link,
+        delivery_status=status,
+        result="PENDING" if status == "DELIVERED" else status,
+        match_id=match_id
+    )
+
+    # 2. Insert into PostgreSQL core.tip_audit_log
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO core.tip_audit_log (
+                        match_id, channel_key, fixture, pick_str, odds, est_prob, edge, stake,
+                        eligible_at_brt, kickoff_at_brt, dispatched_at_brt, status, reason_code, reason_details, match_link
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    str(match_id), channel_key, fixture, pick_str, odds_val, est_prob_str, edge_str, stake,
+                    eligible_at_brt, kickoff_at_brt, dispatched_at_brt, status, reason_code, reason_details, match_link
+                ))
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"DB tip_audit_log insert note: {e}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+class ChannelDispatchRateLimiter:
+    """
+    Manages per-channel dispatch pacing, lead-time guards, anti-burst cooldowns,
+    and dual persistence recording for both delivered and expired/skipped candidate tips.
+    """
+    def __init__(self):
+        self.min_interval_seconds = int(os.getenv("MIN_DISPATCH_INTERVAL_SECONDS", "60"))
+        self.min_lead_time_seconds = int(os.getenv("MIN_LEAD_TIME_SECONDS", "180"))
+        self.burst_window_seconds = 60
+        self.max_burst_count = 2
+        self.micro_spacing_seconds = 15
+        self.burst_cooldown_seconds = 120
+
+        # State per channel_key:
+        self.channels: Dict[str, Dict[str, Any]] = {}
+
+    def get_channel_state(self, channel_key: str) -> Dict[str, Any]:
+        if channel_key not in self.channels:
+            self.channels[channel_key] = {
+                "last_dispatch_ts": 0.0,
+                "dispatch_history": [],
+                "cooldown_until": 0.0,
+                "queue": []
+            }
+        return self.channels[channel_key]
+
+    def can_dispatch_now(self, channel_key: str, current_time: Optional[float] = None) -> Tuple[bool, float]:
+        """
+        Returns (can_dispatch: bool, wait_seconds: float).
+        Enforces:
+        1. Mandatory 120s cooldown if 2 tips were sent in 60s.
+        2. Micro-spacing: >= 15s between consecutive tips.
+        3. Standard 1 tip/60s pacing with max 2 tips/60s burst fallback.
+        """
+        now = current_time if current_time is not None else time.time()
+        state = self.get_channel_state(channel_key)
+
+        # 1. Check Cooldown Lockout
+        if now < state["cooldown_until"]:
+            return False, state["cooldown_until"] - now
+
+        # Prune dispatch history older than burst_window_seconds
+        state["dispatch_history"] = [t for t in state["dispatch_history"] if now - t < self.burst_window_seconds]
+
+        # 2. Check Micro-Spacing
+        if state["dispatch_history"]:
+            time_since_last = now - state["dispatch_history"][-1]
+            if time_since_last < self.micro_spacing_seconds:
+                return False, self.micro_spacing_seconds - time_since_last
+
+        # 3. Burst Cap check (max 2 in 60s)
+        if len(state["dispatch_history"]) >= self.max_burst_count:
+            state["cooldown_until"] = state["dispatch_history"][-1] + self.burst_cooldown_seconds
+            return False, max(0.0, state["cooldown_until"] - now)
+
+        if len(state["dispatch_history"]) == 1:
+            time_since_first = now - state["dispatch_history"][0]
+            if time_since_first >= self.min_interval_seconds:
+                return True, 0.0
+            if (now - state["dispatch_history"][-1]) >= self.micro_spacing_seconds:
+                return True, 0.0
+            return False, self.micro_spacing_seconds - (now - state["dispatch_history"][-1])
+
+        return True, 0.0
+
+    def record_dispatch(self, channel_key: str, current_time: Optional[float] = None):
+        now = current_time if current_time is not None else time.time()
+        state = self.get_channel_state(channel_key)
+        state["last_dispatch_ts"] = now
+        state["dispatch_history"].append(now)
+        if len(state["dispatch_history"]) >= self.max_burst_count:
+            state["cooldown_until"] = now + self.burst_cooldown_seconds
+
+    def enqueue_candidate(self, channel_key: str, candidate: Dict[str, Any]):
+        state = self.get_channel_state(channel_key)
+        m_id = str(candidate.get("match_id", ""))
+        for existing in state["queue"]:
+            if str(existing.get("match_id", "")) == m_id:
+                return
+        state["queue"].append(candidate)
+
+    def process_queues(self, bot_token: Optional[str], cache: Dict[str, Any], client: Optional[Any] = None, current_time: Optional[float] = None):
+        now_ts = current_time if current_time is not None else time.time()
+        now_utc = datetime.fromtimestamp(now_ts, tz=timezone.utc)
+        now_brt = now_utc.astimezone(BRT_TZ)
+
+        for m_key, state in self.channels.items():
+            if not state["queue"]:
+                continue
+
+            channel_id = CHANNEL_MAP.get(m_key) or ""
+
+            # Sort queue by kickoff_at_utc (soonest kickoff first)
+            def get_sort_key(c):
+                ko = c.get("kickoff_at_utc")
+                if ko and isinstance(ko, datetime):
+                    return ko.timestamp()
+                return 9999999999.0
+
+            state["queue"].sort(key=get_sort_key)
+
+            while state["queue"]:
+                cand = state["queue"][0]
+                m_id = str(cand.get("match_id", ""))
+                ko_utc = cand.get("kickoff_at_utc")
+                ko_brt = ko_utc.astimezone(BRT_TZ) if ko_utc else None
+                eligible_brt = cand.get("eligible_at_brt", now_brt)
+                header_title = cand.get("header_title", CHANNEL_TITLES.get(m_key, m_key))
+                fixture_str = cand.get("fixture", "Live Fixture")
+                pick_str = cand.get("pick_str", "Selection")
+                odds_val = float(cand.get("odds_val", 1.90))
+                est_prob_str = cand.get("est_prob_str", "60.0%")
+                edge_str = cand.get("edge_str", "+14.2%")
+                link_url = cand.get("link_url", "https://www.bet365.com/")
+                msg_text = cand.get("msg_text", "")
+                target_bot_token = cand.get("target_bot_token", bot_token)
+
+                # 1. Lead-Time Guard Check
+                if ko_utc:
+                    lead_seconds = (ko_utc - now_utc).total_seconds()
+                    if lead_seconds < self.min_lead_time_seconds:
+                        state["queue"].pop(0)
+                        reason_msg = f"Match kickoff within lead-time buffer ({int(lead_seconds)}s < {self.min_lead_time_seconds}s)"
+                        record_tip_audit_event(
+                            match_id=m_id,
+                            channel_key=m_key,
+                            fixture=fixture_str,
+                            pick_str=pick_str,
+                            odds_val=odds_val,
+                            est_prob_str=est_prob_str,
+                            edge_str=edge_str,
+                            stake="1.00 Unit",
+                            eligible_at_brt=eligible_brt,
+                            kickoff_at_brt=ko_brt,
+                            dispatched_at_brt=None,
+                            status="EXPIRED_LEAD_TIME",
+                            reason_code="EXPIRED_LEAD_TIME",
+                            reason_details=reason_msg,
+                            match_link=link_url
+                        )
+                        logger.info(f"RateLimiter: Dropped expired tip for {fixture_str} on {m_key}: {reason_msg}")
+                        continue
+
+                # 2. Daily Limit Check
+                if is_daily_limit_reached(m_key):
+                    state["queue"].pop(0)
+                    record_tip_audit_event(
+                        match_id=m_id,
+                        channel_key=m_key,
+                        fixture=fixture_str,
+                        pick_str=pick_str,
+                        odds_val=odds_val,
+                        est_prob_str=est_prob_str,
+                        edge_str=edge_str,
+                        stake="1.00 Unit",
+                        eligible_at_brt=eligible_brt,
+                        kickoff_at_brt=ko_brt,
+                        dispatched_at_brt=None,
+                        status="REJECTED_DAILY_CAP",
+                        reason_code="REJECTED_DAILY_CAP",
+                        reason_details="Channel daily 150-tip cap limit reached",
+                        match_link=link_url
+                    )
+                    continue
+
+                # 3. Channel Rate Limit Slot Check
+                can_dispatch, wait_secs = self.can_dispatch_now(m_key, now_ts)
+                if not can_dispatch:
+                    logger.debug(f"RateLimiter: Channel {m_key} locked for {wait_secs:.1f}s. Queued {len(state['queue'])} items.")
+                    break
+
+                # 4. Dispatch Telegram Message
+                msg_id = send_telegram_tip(target_bot_token, channel_id, msg_text, m_key)
+                if msg_id:
+                    self.record_dispatch(m_key, now_ts)
+                    state["queue"].pop(0)
+                    record_daily_published_tip(m_key, m_id, now_brt)
+
+                    cache_key = f"{m_id}_{m_key}"
+                    cache[cache_key] = {
+                        "match_id": m_id,
+                        "type": m_key,
+                        "sport": cand.get("sport", "fifa"),
+                        "home_player": cand.get("home_player", ""),
+                        "away_player": cand.get("away_player", ""),
+                        "fixture": fixture_str,
+                        "published_at_utc": now_utc.isoformat(),
+                        "msg_id": msg_id,
+                        "channel_id": channel_id,
+                        "channel": channel_id,
+                        "token": target_bot_token,
+                        "bot_token": target_bot_token,
+                        "msg_text": msg_text,
+                        "side": cand.get("side", ""),
+                        "line": float(cand.get("line", 0.0)),
+                        "odds": float(odds_val),
+                        "stake": "1.00 Unit"
+                    }
+                    save_published_tips_cache(cache)
+
+                    record_tip_audit_event(
+                        match_id=m_id,
+                        channel_key=m_key,
+                        fixture=fixture_str,
+                        pick_str=pick_str,
+                        odds_val=odds_val,
+                        est_prob_str=est_prob_str,
+                        edge_str=edge_str,
+                        stake="1.00 Unit",
+                        eligible_at_brt=eligible_brt,
+                        kickoff_at_brt=ko_brt,
+                        dispatched_at_brt=now_brt,
+                        status="DELIVERED",
+                        reason_code="DELIVERED",
+                        reason_details="Successfully dispatched within rate limit and lead time",
+                        match_link=link_url
+                    )
+                    logger.info(f"RateLimiter: Successfully dispatched tip for {fixture_str} to {m_key} (Msg ID: {msg_id}).")
+                else:
+                    logger.warning(f"RateLimiter: Failed to send tip for {fixture_str} on {m_key}.")
+                    break
+
+
+RATE_LIMITER = ChannelDispatchRateLimiter()
+
+
 CHANNEL_TITLES = {
     "fifa_goals_ou": "Matrix Esoccer Pre Goals G01",
     "fifa_asian_handicap": "Matrix FIFA Pre AH G01",
@@ -1862,6 +2190,7 @@ def run_live_publisher_cycle(bot_token: Optional[str] = None):
     logger.info(f"Live pre-match fixtures fetched: {len(all_matches)} matches")
 
     now_utc = datetime.now(timezone.utc)
+    now_brt = now_utc.astimezone(BRT_TZ)
     channel_headers = {
         "fifa_goals_ou": "Matrix FIFA Goals Pre O/U G01",
         "fifa_asian_handicap": "Matrix FIFA Pre AH G01",
@@ -1969,31 +2298,32 @@ def run_live_publisher_cycle(bot_token: Optional[str] = None):
             ]
             msg_text = "\n".join(msg_lines)
 
-            msg_id = send_telegram_tip(target_bot_token, channel_id, msg_text, m_key)
-            if msg_id:
-                record_daily_published_tip(m_key, match_id, datetime.now(BRT_TZ))
-                save_key = cache_key or match_id
-                cache[save_key] = {
-                    "match_id": match_id,
-                    "type": m_key,
-                    "sport": "ebasket" if "ebasket" in m_key else "fifa",
-                    "home_player": h_player,
-                    "away_player": a_player,
-                    "fixture": f"{home_team} x {away_team}",
-                    "published_at_utc": now_utc.isoformat(),
-                    "msg_id": msg_id,
-                    "channel_id": channel_id,
-                    "channel": channel_id,
-                    "token": target_bot_token,
-                    "bot_token": target_bot_token,
-                    "msg_text": msg_text,
-                    "side": side_val,
-                    "line": float(line_val),
-                    "odds": float(odds_val)
-                }
-                save_published_tips_cache(cache)
-                record_live_audit_item(header_title, f"{home_team} x {away_team}", pick_str, f"{odds_val:.2f}", est_prob_str, edge_str, "1.00 Unit", link_url, "PUBLISHED", "PENDING", match_id=match_id, msg_id=msg_id)
-                logger.info(f"Successfully dispatched tip for {home_team} vs {away_team} to {m_key} channel.")
+            # Enqueue candidate into Rate Limiting & Pacing Queue
+            kickoff_dt = parse_match_kickoff_time(match)
+            RATE_LIMITER.enqueue_candidate(m_key, {
+                "match_id": match_id,
+                "channel_key": m_key,
+                "channel_id": channel_id,
+                "sport": "ebasket" if "ebasket" in m_key else "fifa",
+                "home_player": h_player,
+                "away_player": a_player,
+                "fixture": f"{home_team} x {away_team}",
+                "kickoff_at_utc": kickoff_dt,
+                "eligible_at_brt": now_brt,
+                "header_title": header_title,
+                "target_bot_token": target_bot_token,
+                "link_url": link_url,
+                "pick_str": pick_str,
+                "odds_val": odds_val,
+                "line": float(line_val),
+                "side": side_val,
+                "est_prob_str": est_prob_str,
+                "edge_str": edge_str,
+                "msg_text": msg_text
+            })
+
+    # 2b. Process per-channel rate-limited dispatch queues with lead-time guards
+    RATE_LIMITER.process_queues(bot_token, cache, client)
 
     # 3. Check result settlement for pending tips
     settle_pending_tips(bot_token, cache, client=client)
