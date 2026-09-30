@@ -157,10 +157,14 @@ def run_compliance_validation():
         import inspect
         edit_source = inspect.getsource(lp.update_telegram_tip_result)
         is_exempt_settle = "record_daily_published_tip" not in edit_source and "daily_tip_ledger" not in edit_source
-        self_ex_report = "record_daily_published_tip" not in inspect.getsource(lp.send_telegram_report)
+
+        report_source = inspect.getsource(lp.check_and_dispatch_scheduled_reports)
+        is_exempt_report = "record_daily_published_tip" not in report_source and "channel_key=None" in report_source
 
         print(f"  • Settlement edit isolated from tip limits : {'YES (EXEMPT)' if is_exempt_settle else 'NO'}")
-        print(f"  • Report dispatch isolated from tip limits : {'YES (EXEMPT)' if self_ex_report else 'NO'}")
+        print(f"  • Report dispatch isolated from tip limits : {'YES (EXEMPT)' if is_exempt_report else 'NO'}")
+        assert is_exempt_settle, "update_telegram_tip_result modifies daily tip ledger!"
+        assert is_exempt_report, "check_and_dispatch_scheduled_reports modifies daily tip ledger!"
 
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM core.daily_tip_ledger WHERE date_brt = %s", (today_str,))
@@ -254,7 +258,7 @@ def run_compliance_validation():
         limiter.process_queues("dummy_token", test_cache)
 
         # Verify that queue dropped it and did not dispatch
-        remaining_in_queue = len(limiter.queues["fifa_goals_ou"]["queue"])
+        remaining_in_queue = len(limiter.channels["fifa_goals_ou"]["queue"])
         assert remaining_in_queue == 0, "Expired tip was not dropped from queue!"
         assert "EXPIRY_TEST_888_fifa_goals_ou" not in test_cache, "Expired tip was dispatched!"
 
