@@ -930,6 +930,36 @@ def ensure_persistence_tables():
                     match_link TEXT,
                     created_at_brt TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 );
+                CREATE TABLE IF NOT EXISTS core.published_tips (
+                    id SERIAL PRIMARY KEY,
+                    match_id VARCHAR(64) NOT NULL,
+                    channel_key VARCHAR(64) NOT NULL,
+                    channel_id VARCHAR(64) NOT NULL,
+                    msg_id BIGINT NOT NULL,
+                    sport VARCHAR(32) NOT NULL DEFAULT 'fifa',
+                    home_player VARCHAR(128),
+                    away_player VARCHAR(128),
+                    fixture VARCHAR(255) NOT NULL,
+                    market_type VARCHAR(64) NOT NULL,
+                    pick_str VARCHAR(128) NOT NULL,
+                    side VARCHAR(32) NOT NULL,
+                    line NUMERIC(6, 2) NOT NULL,
+                    odds NUMERIC(6, 3) NOT NULL,
+                    stake VARCHAR(32) DEFAULT '1.00 Unit',
+                    msg_text TEXT NOT NULL,
+                    match_link TEXT,
+                    published_at_utc TIMESTAMP WITH TIME ZONE NOT NULL,
+                    kickoff_at_utc TIMESTAMP WITH TIME ZONE,
+                    status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+                    final_score VARCHAR(32),
+                    outcome VARCHAR(32),
+                    net_units NUMERIC(8, 4),
+                    settled_at_utc TIMESTAMP WITH TIME ZONE,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    CONSTRAINT uq_published_tips_match_channel UNIQUE (match_id, channel_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_published_tips_status ON core.published_tips(status);
+                CREATE INDEX IF NOT EXISTS idx_published_tips_match_id ON core.published_tips(match_id);
             """)
             conn.commit()
             return True
@@ -945,6 +975,217 @@ def ensure_persistence_tables():
             conn.close()
         except Exception:
             pass
+
+
+def record_published_tip_to_db(record: Dict[str, Any]) -> bool:
+    """Permanently records an in-play published tip into PostgreSQL core.published_tips as the single source of truth."""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cur:
+            pub_utc = record.get("published_at_utc")
+            if isinstance(pub_utc, str):
+                try:
+                    pub_utc = datetime.fromisoformat(pub_utc.replace("Z", "+00:00"))
+                except Exception:
+                    pub_utc = datetime.now(timezone.utc)
+            elif not pub_utc:
+                pub_utc = datetime.now(timezone.utc)
+
+            ko_utc = record.get("kickoff_at_utc")
+            if isinstance(ko_utc, str):
+                try:
+                    ko_utc = datetime.fromisoformat(ko_utc.replace("Z", "+00:00"))
+                except Exception:
+                    ko_utc = None
+
+            cur.execute("""
+                INSERT INTO core.published_tips (
+                    match_id, channel_key, channel_id, msg_id, sport, home_player, away_player,
+                    fixture, market_type, pick_str, side, line, odds, stake, msg_text, match_link,
+                    published_at_utc, kickoff_at_utc, status
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING'
+                )
+                ON CONFLICT (match_id, channel_key) DO UPDATE SET
+                    channel_id = EXCLUDED.channel_id,
+                    msg_id = EXCLUDED.msg_id,
+                    side = EXCLUDED.side,
+                    line = EXCLUDED.line,
+                    odds = EXCLUDED.odds,
+                    msg_text = EXCLUDED.msg_text,
+                    status = 'PENDING';
+            """, (
+                str(record.get("match_id", "")),
+                str(record.get("channel_key", "")),
+                str(record.get("channel_id", "")),
+                int(record.get("msg_id", 0)),
+                str(record.get("sport", "fifa")),
+                str(record.get("home_player", "")),
+                str(record.get("away_player", "")),
+                str(record.get("fixture", "")),
+                str(record.get("market_type", record.get("channel_key", ""))),
+                str(record.get("pick_str", "")),
+                str(record.get("side", "")),
+                float(record.get("line", 0.0)),
+                float(record.get("odds", 1.90)),
+                str(record.get("stake", "1.00 Unit")),
+                str(record.get("msg_text", "")),
+                str(record.get("match_link", "")),
+                pub_utc,
+                ko_utc
+            ))
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.warning(f"Error recording published tip to DB: {e}")
+        try: conn.rollback()
+        except Exception: pass
+        return False
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+def load_pending_tips_from_db() -> Dict[str, Dict[str, Any]]:
+    """Loads all pending in-play tips directly from PostgreSQL core.published_tips (the source of truth)."""
+    pending = {}
+    conn = get_db_connection()
+    if not conn:
+        return pending
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT match_id, channel_key, channel_id, msg_id, sport, home_player, away_player,
+                       fixture, market_type, pick_str, side, line, odds, stake, msg_text, match_link,
+                       published_at_utc, kickoff_at_utc
+                FROM core.published_tips
+                WHERE status = 'PENDING'
+                ORDER BY published_at_utc ASC;
+            """)
+            for row in cur.fetchall():
+                m_id = str(row[0])
+                c_key = str(row[1])
+                cache_k = f"{m_id}_{c_key}"
+                pending[cache_k] = {
+                    "match_id": m_id,
+                    "type": c_key,
+                    "channel_key": c_key,
+                    "channel_id": str(row[2]),
+                    "channel": str(row[2]),
+                    "msg_id": int(row[3]),
+                    "sport": str(row[4] or "fifa"),
+                    "home_player": str(row[5] or ""),
+                    "away_player": str(row[6] or ""),
+                    "fixture": str(row[7] or ""),
+                    "market_type": str(row[8] or c_key),
+                    "pick_str": str(row[9] or ""),
+                    "side": str(row[10] or ""),
+                    "line": float(row[11]) if row[11] is not None else 0.0,
+                    "odds": float(row[12]) if row[12] is not None else 1.90,
+                    "stake": str(row[13] or "1.00 Unit"),
+                    "msg_text": str(row[14] or ""),
+                    "match_link": str(row[15] or ""),
+                    "published_at_utc": row[16].isoformat() if row[16] else datetime.now(timezone.utc).isoformat(),
+                    "kickoff_at_utc": row[17]
+                }
+    except Exception as e:
+        logger.warning(f"Error loading pending tips from DB: {e}")
+    finally:
+        try: conn.close()
+        except Exception: pass
+    return pending
+
+
+def update_published_tip_settled_in_db(match_id: str, channel_key: str, outcome: str, final_score: str, net_units: float) -> bool:
+    """Updates a tip's settlement status, score, and net units in PostgreSQL core.published_tips."""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE core.published_tips
+                SET status = 'SETTLED',
+                    outcome = %s,
+                    final_score = %s,
+                    net_units = %s,
+                    settled_at_utc = NOW()
+                WHERE match_id = %s AND channel_key = %s;
+            """, (outcome, final_score, net_units, match_id, channel_key))
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.warning(f"Error updating published tip settled status in DB: {e}")
+        try: conn.rollback()
+        except Exception: pass
+        return False
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+def parse_tip_selection_from_msg_text(msg_text: str, channel_type: str = "") -> Tuple[Optional[str], Optional[float]]:
+    """
+    Ground-truth parser: extracts (side, line) directly from what was actually posted on Telegram.
+    Returns (side, line) or (None, None).
+    Guarantees that Portuguese 'Mais de' is ALWAYS 'over' and 'Menos de' is ALWAYS 'under'.
+    """
+    if not msg_text:
+        return None, None
+
+    bet_line = ""
+    for line in msg_text.splitlines():
+        if line.strip().startswith("Bet:"):
+            bet_line = line.strip()[4:].strip()
+            break
+
+    if not bet_line:
+        return None, None
+
+    bet_lower = bet_line.lower()
+
+    # 1. Over / Under (Goals or Points)
+    if "mais de" in bet_lower or "over" in bet_lower:
+        m = re.search(r'(?:mais de|over)\s*([0-9.]+)', bet_lower)
+        if m:
+            return "over", float(m.group(1))
+    elif "menos de" in bet_lower or "under" in bet_lower:
+        m = re.search(r'(?:menos de|under)\s*([0-9.]+)', bet_lower)
+        if m:
+            return "under", float(m.group(1))
+
+    # 2. Asian Handicap
+    m_ah = re.search(r'\(([+-]?[0-9.]+)\)', bet_line)
+    if m_ah:
+        line_val = float(m_ah.group(1))
+        for line in msg_text.splitlines():
+            if line.strip().startswith("Teams/Match:"):
+                fixture_text = line.strip()[12:].strip()
+                if " x " in fixture_text:
+                    h_part, a_part = fixture_text.split(" x ", 1)
+                    team_bet = bet_line.split("(")[0].strip().lower()
+                    if team_bet in h_part.lower():
+                        return "home", line_val
+                    elif team_bet in a_part.lower():
+                        return "away", line_val
+        return "home", line_val
+
+    # 3. Money Line / 1X2
+    if "resultado final" in bet_lower or "money line" in bet_lower or "(dnb)" in bet_lower:
+        for line in msg_text.splitlines():
+            if line.strip().startswith("Teams/Match:"):
+                fixture_text = line.strip()[12:].strip()
+                if " x " in fixture_text:
+                    h_part, a_part = fixture_text.split(" x ", 1)
+                    team_bet = bet_line.replace("(DNB)", "").strip().lower()
+                    if team_bet in h_part.lower():
+                        return "home", 0.0
+                    elif team_bet in a_part.lower():
+                        return "away", 0.0
+
+    return None, None
 
 
 def rehydrate_ledgers_from_db():
@@ -1729,6 +1970,28 @@ class ChannelDispatchRateLimiter:
                     }
                     save_published_tips_cache(cache)
 
+                    # Persist immediately into PostgreSQL core.published_tips as the single source of truth
+                    record_published_tip_to_db({
+                        "match_id": m_id,
+                        "channel_key": m_key,
+                        "channel_id": target_channel_id,
+                        "msg_id": msg_id,
+                        "sport": cand.get("sport", "fifa"),
+                        "home_player": cand.get("home_player", ""),
+                        "away_player": cand.get("away_player", ""),
+                        "fixture": fixture_str,
+                        "market_type": m_key,
+                        "pick_str": pick_str,
+                        "side": cand.get("side", ""),
+                        "line": float(cand.get("line", 0.0)),
+                        "odds": float(odds_val),
+                        "stake": "1.00 Unit",
+                        "msg_text": msg_text,
+                        "match_link": link_url,
+                        "published_at_utc": now_utc,
+                        "kickoff_at_utc": ko_brt.astimezone(timezone.utc) if ko_brt else None
+                    })
+
                     record_tip_audit_event(
                         match_id=m_id,
                         channel_key=m_key,
@@ -2444,13 +2707,49 @@ def extract_tip_match_ids(info: Dict[str, Any], key: str) -> List[str]:
 def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
     """
     Checks pending published tips and updates Telegram results ONLY when matches are 100% finished.
-    STRICT 1-TO-1 MATCH ID MAPPING:
-    - Queries active API /history/pre and /history/ebasket/pre feeds.
-    - Settle ONLY when the specific Match ID has an officially confirmed final score (isFinished == True).
-    - Prevents cross-match pollution: NEVER applies scores from older/different matches.
+    DATABASE-FIRST SOURCE OF TRUTH & STRICT 1-TO-1 MATCH ID MAPPING:
+    - Loads pending tips from PostgreSQL core.published_tips (persisted source of truth).
+    - Queries active API /history/pre and /history/ebasket/pre feeds with both homeName and awayName.
+    - Settle ONLY when the specific Match ID has an officially confirmed full-time final score.
+    - Ground-truth 'side' and 'line' are strictly verified against msg_text ('Mais de' = over, 'Menos de' = under).
     """
+    # 0. Load ground-truth pending tips from PostgreSQL
+    db_pending = load_pending_tips_from_db()
+
     if not cache:
         cache = load_published_tips_cache()
+    if not isinstance(cache, dict):
+        cache = {}
+
+    # Synchronize cache entries into PostgreSQL core.published_tips so nothing is missed
+    for c_key, c_info in list(cache.items()):
+        if isinstance(c_info, dict) and c_key not in db_pending:
+            record_published_tip_to_db({
+                "match_id": c_info.get("match_id", c_key.split("_")[0]),
+                "channel_key": c_info.get("type", c_info.get("channel_key", "")),
+                "channel_id": c_info.get("channel_id", c_info.get("channel", "")),
+                "msg_id": c_info.get("msg_id", 0),
+                "sport": c_info.get("sport", "fifa"),
+                "home_player": c_info.get("home_player", ""),
+                "away_player": c_info.get("away_player", ""),
+                "fixture": c_info.get("fixture", ""),
+                "market_type": c_info.get("type", ""),
+                "pick_str": c_info.get("pick_str", ""),
+                "side": c_info.get("side", ""),
+                "line": c_info.get("line", 0.0),
+                "odds": c_info.get("odds", 1.90),
+                "stake": c_info.get("stake", "1.00 Unit"),
+                "msg_text": c_info.get("msg_text", ""),
+                "match_link": c_info.get("match_link", ""),
+                "published_at_utc": c_info.get("published_at_utc")
+            })
+            db_pending[c_key] = c_info
+
+    # Mirror db_pending back into cache for downstream compatibility
+    for d_key, d_info in db_pending.items():
+        if d_key not in cache:
+            cache[d_key] = d_info
+
     if not cache:
         return
 
@@ -2496,71 +2795,85 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
 
                 endpoint = "/history/ebasket/pre" if is_ebasket else "/history/pre"
                 for player in candidates:
-                    query_key = f"{sport_tag}_{player.lower()}"
-                    if query_key in queried_players or not player:
-                        continue
-                    queried_players.add(query_key)
-                    try:
-                        resp = client._execute_request("GET", endpoint, params={"homeName": player})
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            matches = data.get("matches", data) if isinstance(data, dict) else data
-                            if isinstance(matches, list):
-                                for m in matches:
-                                    if not isinstance(m, dict):
-                                        continue
+                    for param_key in ["homeName", "awayName"]:
+                        query_key = f"{sport_tag}_{player.lower()}_{param_key}"
+                        if query_key in queried_players or not player:
+                            continue
+                        queried_players.add(query_key)
+                        try:
+                            resp = client._execute_request("GET", endpoint, params={param_key: player})
+                            if resp.status_code == 200:
+                                data = resp.json()
+                                matches = data.get("matches", data) if isinstance(data, dict) else data
+                                if isinstance(matches, list):
+                                    for m in matches:
+                                        if not isinstance(m, dict):
+                                            continue
 
-                                    b365_id = normalize_match_id(m.get("idMatchBet365") or m.get("bet365_id") or "")
-                                    m_id = normalize_match_id(m.get("_id") or m.get("id") or "")
+                                        b365_id = normalize_match_id(m.get("idMatchBet365") or m.get("bet365_id") or "")
+                                        m_id = normalize_match_id(m.get("_id") or m.get("id") or "")
 
-                                    # STRICT 1-TO-1 MATCH ID FILTER: Only process if this match ID is in our pending tips!
-                                    if not (b365_id in pending_ids or m_id in pending_ids or str(m.get("_id")) in pending_ids or str(m.get("idMatchBet365")) in pending_ids):
-                                        continue
+                                        # STRICT 1-TO-1 MATCH ID FILTER: Only process if this match ID is in our pending tips!
+                                        if not (b365_id in pending_ids or m_id in pending_ids or str(m.get("_id")) in pending_ids or str(m.get("idMatchBet365")) in pending_ids):
+                                            continue
 
-                                    m_status = str(m.get("status") or m.get("state") or "").upper()
-                                    if m.get("isFinished") is False or m_status in ["LIVE", "IN_PLAY", "FIRST_HALF", "SECOND_HALF"]:
-                                        continue
+                                        m_status = str(m.get("status") or m.get("state") or "").upper()
+                                        if m.get("isFinished") is False or m_status in ["LIVE", "IN_PLAY", "FIRST_HALF", "SECOND_HALF"]:
+                                            continue
 
-                                    home_obj = m.get("home", {}) if isinstance(m.get("home"), dict) else {}
-                                    away_obj = m.get("away", {}) if isinstance(m.get("away"), dict) else {}
-                                    h_g = home_obj.get("goals") if home_obj.get("goals") is not None else home_obj.get("score")
-                                    a_g = away_obj.get("goals") if away_obj.get("goals") is not None else away_obj.get("score")
+                                        home_obj = m.get("home", {}) if isinstance(m.get("home"), dict) else {}
+                                        away_obj = m.get("away", {}) if isinstance(m.get("away"), dict) else {}
+                                        h_g = home_obj.get("goals") if home_obj.get("goals") is not None else home_obj.get("score")
+                                        a_g = away_obj.get("goals") if away_obj.get("goals") is not None else away_obj.get("score")
 
-                                    is_finished = (
-                                        m.get("isFinished") is True
-                                        or m_status in ["ENDED", "FINISHED", "FT", "CLOSED"]
-                                        or (h_g is not None and a_g is not None)
-                                    )
-                                    if not is_finished:
-                                        continue
-
-                                    if h_g is not None and a_g is not None:
-                                        try:
-                                            fh = float(h_g)
-                                            fa = float(a_g)
-                                            score_pair = (fh, fa)
-                                            if is_ebasket:
-                                                if (fh + fa) >= 45.0 and fh >= 15.0 and fa >= 15.0:
-                                                    if b365_id:
-                                                        ebasket_db_results[b365_id] = score_pair
-                                                        ebasket_db_results[f"E{b365_id}"] = score_pair
-                                                    if m_id:
-                                                        ebasket_db_results[m_id] = score_pair
-                                                    if m.get("_id"):
-                                                        ebasket_db_results[str(m["_id"])] = score_pair
+                                        is_finished = (
+                                            m.get("isFinished") is True
+                                            or m_status in ["ENDED", "FINISHED", "FT", "CLOSED"]
+                                        )
+                                        # If status is omitted by API, only accept if match has played its full duration
+                                        if not is_finished and h_g is not None and a_g is not None:
+                                            started_str = m.get("startedAt")
+                                            if started_str:
+                                                try:
+                                                    s_dt = datetime.fromisoformat(started_str.replace("Z", "+00:00"))
+                                                    min_duration = 480 if not is_ebasket else 900  # 8 mins for FIFA, 15 mins for eBasket
+                                                    if (now_dt - s_dt).total_seconds() >= min_duration:
+                                                        is_finished = True
+                                                except Exception:
+                                                    is_finished = True
                                             else:
-                                                if (fh + fa) <= 30.0 and fh <= 20.0 and fa <= 20.0:
-                                                    if b365_id:
-                                                        fifa_db_results[b365_id] = score_pair
-                                                        fifa_db_results[f"E{b365_id}"] = score_pair
-                                                    if m_id:
-                                                        fifa_db_results[m_id] = score_pair
-                                                    if m.get("_id"):
-                                                        fifa_db_results[str(m["_id"])] = score_pair
-                                        except (ValueError, TypeError):
-                                            pass
-                    except Exception as api_err:
-                        logger.debug(f"History query note for player {player} ({sport_tag}): {api_err}")
+                                                is_finished = True
+
+                                        if not is_finished:
+                                            continue
+
+                                        if h_g is not None and a_g is not None:
+                                            try:
+                                                fh = float(h_g)
+                                                fa = float(a_g)
+                                                score_pair = (fh, fa)
+                                                if is_ebasket:
+                                                    if (fh + fa) >= 45.0 and fh >= 15.0 and fa >= 15.0:
+                                                        if b365_id:
+                                                            ebasket_db_results[b365_id] = score_pair
+                                                            ebasket_db_results[f"E{b365_id}"] = score_pair
+                                                        if m_id:
+                                                            ebasket_db_results[m_id] = score_pair
+                                                        if m.get("_id"):
+                                                            ebasket_db_results[str(m["_id"])] = score_pair
+                                                else:
+                                                    if (fh + fa) <= 30.0 and fh <= 20.0 and fa <= 20.0:
+                                                        if b365_id:
+                                                            fifa_db_results[b365_id] = score_pair
+                                                            fifa_db_results[f"E{b365_id}"] = score_pair
+                                                        if m_id:
+                                                            fifa_db_results[m_id] = score_pair
+                                                        if m.get("_id"):
+                                                            fifa_db_results[str(m["_id"])] = score_pair
+                                            except (ValueError, TypeError):
+                                                pass
+                        except Exception as api_err:
+                            logger.debug(f"History query note for player {player} ({sport_tag}): {api_err}")
         except Exception as query_ex:
             logger.debug(f"API query cycle note: {query_ex}")
 
@@ -2649,7 +2962,7 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
         except Exception as db_ex:
             logger.debug(f"PostgreSQL core.results query note: {db_ex}")
 
-    # 3. Settle pending tips with strict 1-to-1 Match ID mapping
+    # 3. Settle pending tips with strict 1-to-1 Match ID mapping and Ground-Truth Parsing
     keys_to_settle = list(cache.keys())
     for key in keys_to_settle:
         info = cache.get(key)
@@ -2703,8 +3016,13 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                 logger.error(f"REJECTED PLAUSIBILITY VIOLATION: FIFA match {key} score {h_score}-{a_score} is too high. Tip stays pending!")
                 continue
 
-        side = str(info.get("side", "over" if "ou" in t_type else "home")).lower()
-        line = float(info.get("line", 2.5 if "ou" in t_type else 0.0))
+        # GROUND-TRUTH SELECTION: Parse directly from msg_text to prevent any side inversion
+        parsed_side, parsed_line = parse_tip_selection_from_msg_text(msg_text, t_type)
+        side = parsed_side or str(info.get("side", "")).lower()
+        if not side:
+            side = "over" if "ou" in t_type else "home"
+        line = parsed_line if parsed_line is not None else float(info.get("line", 2.5 if "ou" in t_type else 0.0))
+
         res_status = evaluate_match_result(t_type, side, line, h_score, a_score)
 
         if res_status:
@@ -2735,6 +3053,7 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                 pub_time_str = info.get("published_at_utc") or now_dt.isoformat()
                 now_b = datetime.now(BRT_TZ)
                 primary_id = id_variants[0] if id_variants else str(info.get("match_id") or key)
+                score_str_val = f"{int(h_score)}-{int(a_score)}" if (h_score.is_integer() and a_score.is_integer()) else f"{h_score}-{a_score}"
                 settled_record = {
                     "match_id": primary_id,
                     "channel_key": t_type,
@@ -2747,10 +3066,15 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                     "side": side,
                     "line": line,
                     "odds": odds_num,
-                    "final_score": f"{int(h_score)}-{int(a_score)}" if (h_score.is_integer() and a_score.is_integer()) else f"{h_score}-{a_score}",
+                    "final_score": score_str_val,
                     "outcome": res_status,
                     "net_units": net_u
                 }
+
+                # Update PostgreSQL core.published_tips (the source of truth)
+                update_published_tip_settled_in_db(primary_id, t_type, res_status, score_str_val, net_u)
+
+                # Persist to permanent ledgers and audit
                 record_settled_tip(settled_record)
                 update_live_audit_result(primary_id, res_status)
 
