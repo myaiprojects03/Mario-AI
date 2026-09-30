@@ -2418,14 +2418,35 @@ def normalize_match_id(mid: Any) -> str:
     return s
 
 
+def extract_tip_match_ids(info: Dict[str, Any], key: str) -> List[str]:
+    """Extracts all possible normalized and raw Match ID variations for a tip."""
+    ids = set()
+    raw_id = str(info.get("match_id") or key.split("_")[-1]).strip()
+    if raw_id:
+        ids.add(raw_id)
+        norm = normalize_match_id(raw_id)
+        if norm:
+            ids.add(norm)
+            ids.add(f"E{norm}")
+
+    # Check msg_text and link for Bet365 ID
+    link_url = str(info.get("match_link") or info.get("link_url") or info.get("msg_text") or "")
+    m_b365 = re.search(r'/E(\d{6,12})/', link_url) or re.search(r'EV(\d{6,12})', link_url) or re.search(r'E(\d{7,10})', link_url)
+    if m_b365:
+        b_val = m_b365.group(1)
+        ids.add(b_val)
+        ids.add(f"E{b_val}")
+
+    return [i for i in ids if i]
+
+
 def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
     """
     Checks pending published tips and updates Telegram results ONLY when matches are 100% finished.
     STRICT 1-TO-1 MATCH ID MAPPING:
-    - Matches are identified SOLELY by their unique Match ID / Bet365 ID.
-    - Zero fuzzy player-name queries or historical guessing.
+    - Queries active API /history/pre and /history/ebasket/pre feeds.
     - Settle ONLY when the specific Match ID has an officially confirmed final score (isFinished == True).
-    - Sport isolation: eSoccer goals (0-30) and eBasket points (45+) are strictly validated.
+    - Prevents cross-match pollution: NEVER applies scores from older/different matches.
     """
     if not cache:
         cache = load_published_tips_cache()
@@ -2444,99 +2465,96 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
 
     # Build comprehensive normalized set of pending match IDs from cache
     pending_ids = set()
-    for v in cache.values():
-        if isinstance(v, dict) and v.get("match_id"):
-            raw_id = str(v["match_id"]).strip()
-            norm_id = normalize_match_id(raw_id)
-            if raw_id:
-                pending_ids.add(raw_id)
-            if norm_id:
-                pending_ids.add(norm_id)
+    for key, v in cache.items():
+        if isinstance(v, dict):
+            for m_id_variant in extract_tip_match_ids(v, key):
+                pending_ids.add(m_id_variant)
 
     pending_ids_list = list(pending_ids)
 
     # 1. Query verified finished matches from JarvisBet API results feeds by Match ID
     if client and pending_ids_list:
         try:
-            fifa_history = client.get_fifa_history() or []
-            ebasket_history = client.get_ebasket_history() or []
-            
-            for m in fifa_history:
-                if not isinstance(m, dict):
+            queried_players = set()
+            for key, info in cache.items():
+                if not isinstance(info, dict):
                     continue
-                b365_id = normalize_match_id(m.get("idMatchBet365") or m.get("bet365_id") or "")
-                m_id = normalize_match_id(m.get("_id") or m.get("id") or "")
-                
-                # Check if this finished match corresponds to one of our pending tips
-                if not (b365_id in pending_ids or m_id in pending_ids or str(m.get("_id")) in pending_ids or str(m.get("idMatchBet365")) in pending_ids):
-                    continue
+                h_p = str(info.get("home_player") or "").strip()
+                a_p = str(info.get("away_player") or "").strip()
+                msg_t = str(info.get("msg_text") or "")
+                t_type = str(info.get("type", "")).lower()
+                is_ebasket = "ebasket" in t_type or info.get("sport") == "ebasket"
+                sport_tag = "ebasket" if is_ebasket else "fifa"
 
-                m_status = str(m.get("status") or m.get("state") or "").upper()
-                is_finished = m.get("isFinished") is True or m_status in ["ENDED", "FINISHED", "FT", "CLOSED"]
-                if not is_finished:
-                    continue
+                candidates = [p for p in [h_p, a_p] if p]
+                if not candidates and "Teams/Match:" in msg_t:
+                    found = re.findall(r'\(([^)]+)\)', msg_t)
+                    for f_name in found:
+                        if len(f_name.strip()) > 1:
+                            candidates.append(f_name.strip())
 
-                home_obj = m.get("home", {}) if isinstance(m.get("home"), dict) else {}
-                away_obj = m.get("away", {}) if isinstance(m.get("away"), dict) else {}
-                h_g = home_obj.get("goals") if home_obj.get("goals") is not None else home_obj.get("score")
-                a_g = away_obj.get("goals") if away_obj.get("goals") is not None else away_obj.get("score")
-
-                if h_g is not None and a_g is not None:
+                endpoint = "/history/ebasket/pre" if is_ebasket else "/history/pre"
+                for player in candidates:
+                    query_key = f"{sport_tag}_{player.lower()}"
+                    if query_key in queried_players or not player:
+                        continue
+                    queried_players.add(query_key)
                     try:
-                        fh = float(h_g)
-                        fa = float(a_g)
-                        if (fh + fa) <= 30.0 and fh <= 20.0 and fa <= 20.0:
-                            score_pair = (fh, fa)
-                            if b365_id:
-                                fifa_db_results[b365_id] = score_pair
-                                fifa_db_results[f"E{b365_id}"] = score_pair
-                            if m_id:
-                                fifa_db_results[m_id] = score_pair
-                            if m.get("_id"):
-                                fifa_db_results[str(m["_id"])] = score_pair
-                            if m.get("idMatchBet365"):
-                                fifa_db_results[str(m["idMatchBet365"])] = score_pair
-                    except (ValueError, TypeError):
-                        pass
+                        resp = client._execute_request("GET", endpoint, params={"homeName": player})
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            matches = data.get("matches", data) if isinstance(data, dict) else data
+                            if isinstance(matches, list):
+                                for m in matches:
+                                    if not isinstance(m, dict):
+                                        continue
 
-            for m in ebasket_history:
-                if not isinstance(m, dict):
-                    continue
-                b365_id = normalize_match_id(m.get("idMatchBet365") or m.get("bet365_id") or "")
-                m_id = normalize_match_id(m.get("_id") or m.get("id") or "")
+                                    b365_id = normalize_match_id(m.get("idMatchBet365") or m.get("bet365_id") or "")
+                                    m_id = normalize_match_id(m.get("_id") or m.get("id") or "")
 
-                if not (b365_id in pending_ids or m_id in pending_ids or str(m.get("_id")) in pending_ids or str(m.get("idMatchBet365")) in pending_ids):
-                    continue
+                                    # STRICT 1-TO-1 MATCH ID FILTER: Only process if this match ID is in our pending tips!
+                                    if not (b365_id in pending_ids or m_id in pending_ids or str(m.get("_id")) in pending_ids or str(m.get("idMatchBet365")) in pending_ids):
+                                        continue
 
-                m_status = str(m.get("status") or m.get("state") or "").upper()
-                is_finished = m.get("isFinished") is True or m_status in ["ENDED", "FINISHED", "FT", "CLOSED"]
-                if not is_finished:
-                    continue
+                                    m_status = str(m.get("status") or m.get("state") or "").upper()
+                                    is_finished = m.get("isFinished") is True or m_status in ["ENDED", "FINISHED", "FT", "CLOSED"]
+                                    if not is_finished:
+                                        continue
 
-                home_obj = m.get("home", {}) if isinstance(m.get("home"), dict) else {}
-                away_obj = m.get("away", {}) if isinstance(m.get("away"), dict) else {}
-                h_g = home_obj.get("goals") if home_obj.get("goals") is not None else home_obj.get("score")
-                a_g = away_obj.get("goals") if away_obj.get("goals") is not None else away_obj.get("score")
+                                    home_obj = m.get("home", {}) if isinstance(m.get("home"), dict) else {}
+                                    away_obj = m.get("away", {}) if isinstance(m.get("away"), dict) else {}
+                                    h_g = home_obj.get("goals") if home_obj.get("goals") is not None else home_obj.get("score")
+                                    a_g = away_obj.get("goals") if away_obj.get("goals") is not None else away_obj.get("score")
 
-                if h_g is not None and a_g is not None:
-                    try:
-                        fh = float(h_g)
-                        fa = float(a_g)
-                        if (fh + fa) >= 45.0 and fh >= 15.0 and fa >= 15.0:
-                            score_pair = (fh, fa)
-                            if b365_id:
-                                ebasket_db_results[b365_id] = score_pair
-                                ebasket_db_results[f"E{b365_id}"] = score_pair
-                            if m_id:
-                                ebasket_db_results[m_id] = score_pair
-                            if m.get("_id"):
-                                ebasket_db_results[str(m["_id"])] = score_pair
-                            if m.get("idMatchBet365"):
-                                ebasket_db_results[str(m["idMatchBet365"])] = score_pair
-                    except (ValueError, TypeError):
-                        pass
-        except Exception as api_err:
-            logger.debug(f"API results query note: {api_err}")
+                                    if h_g is not None and a_g is not None:
+                                        try:
+                                            fh = float(h_g)
+                                            fa = float(a_g)
+                                            score_pair = (fh, fa)
+                                            if is_ebasket:
+                                                if (fh + fa) >= 45.0 and fh >= 15.0 and fa >= 15.0:
+                                                    if b365_id:
+                                                        ebasket_db_results[b365_id] = score_pair
+                                                        ebasket_db_results[f"E{b365_id}"] = score_pair
+                                                    if m_id:
+                                                        ebasket_db_results[m_id] = score_pair
+                                                    if m.get("_id"):
+                                                        ebasket_db_results[str(m["_id"])] = score_pair
+                                            else:
+                                                if (fh + fa) <= 30.0 and fh <= 20.0 and fa <= 20.0:
+                                                    if b365_id:
+                                                        fifa_db_results[b365_id] = score_pair
+                                                        fifa_db_results[f"E{b365_id}"] = score_pair
+                                                    if m_id:
+                                                        fifa_db_results[m_id] = score_pair
+                                                    if m.get("_id"):
+                                                        fifa_db_results[str(m["_id"])] = score_pair
+                                        except (ValueError, TypeError):
+                                            pass
+                    except Exception as api_err:
+                        logger.debug(f"History query note for player {player} ({sport_tag}): {api_err}")
+        except Exception as query_ex:
+            logger.debug(f"API query cycle note: {query_ex}")
 
     # 2. Query verified results table in PostgreSQL with normalized Match ID matching
     if pending_ids_list:
@@ -2630,8 +2648,6 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
         if not isinstance(info, dict):
             continue
 
-        m_id_raw = str(info.get("match_id") or key.split("_")[-1]).strip()
-        m_id_norm = normalize_match_id(m_id_raw)
         tok = info.get("token") or info.get("bot_token") or bot_token
         ch = info.get("channel") or info.get("channel_id")
         mid = info.get("msg_id")
@@ -2646,22 +2662,22 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
         t_type = str(info.get("type", "")).lower()
         is_ebasket = "ebasket" in t_type or info.get("sport") == "ebasket"
 
-        # STRICT MATCH ID LOOKUP ONLY
+        # Check all possible ID variants for this tip
+        id_variants = extract_tip_match_ids(info, key)
         score_pair = None
-        if is_ebasket:
-            score_pair = (
-                ebasket_db_results.get(m_id_norm) 
-                or ebasket_db_results.get(m_id_raw) 
-                or ebasket_db_results.get(f"E{m_id_norm}")
-            )
-        else:
-            score_pair = (
-                fifa_db_results.get(m_id_norm) 
-                or fifa_db_results.get(m_id_raw) 
-                or fifa_db_results.get(f"E{m_id_norm}")
-            )
 
-        # If this exact match ID has not finished, keep it pending. Never guess from player history!
+        if is_ebasket:
+            for variant in id_variants:
+                if variant in ebasket_db_results:
+                    score_pair = ebasket_db_results[variant]
+                    break
+        else:
+            for variant in id_variants:
+                if variant in fifa_db_results:
+                    score_pair = fifa_db_results[variant]
+                    break
+
+        # If this exact match ID has not finished, keep it pending.
         if score_pair is None:
             continue
 
@@ -2671,12 +2687,12 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
         if is_ebasket:
             total_pts = h_score + a_score
             if total_pts < 45.0 or h_score < 15.0 or a_score < 15.0:
-                logger.error(f"REJECTED PLAUSIBILITY VIOLATION: eBasket match {m_id_raw} score {h_score}-{a_score} is too low. Tip stays pending!")
+                logger.error(f"REJECTED PLAUSIBILITY VIOLATION: eBasket match {key} score {h_score}-{a_score} is too low. Tip stays pending!")
                 continue
         else:
             total_goals = h_score + a_score
             if total_goals > 30.0 or h_score > 20.0 or a_score > 20.0:
-                logger.error(f"REJECTED PLAUSIBILITY VIOLATION: FIFA match {m_id_raw} score {h_score}-{a_score} is too high. Tip stays pending!")
+                logger.error(f"REJECTED PLAUSIBILITY VIOLATION: FIFA match {key} score {h_score}-{a_score} is too high. Tip stays pending!")
                 continue
 
         side = str(info.get("side", "over" if "ou" in t_type else "home")).lower()
@@ -2687,7 +2703,7 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
             ok = update_telegram_tip_result(tok, ch, mid, msg_text, res_status)
             if ok:
                 status_label = "✅ Won" if res_status == "WIN" else ("❌ Lost" if res_status == "LOSS" else "Void")
-                logger.info(f"SETTLED TIP: Match {m_id_raw} ({t_type}) -> {status_label} (Final Score: {h_score}-{a_score}) (Edited Msg {mid})")
+                logger.info(f"SETTLED TIP: Match {key} ({t_type}) -> {status_label} (Final Score: {h_score}-{a_score}) (Edited Msg {mid})")
 
                 odds_num = float(info.get("odds", 1.90))
                 if not odds_num or odds_num <= 1.0:
@@ -2710,8 +2726,9 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
 
                 pub_time_str = info.get("published_at_utc") or now_dt.isoformat()
                 now_b = datetime.now(BRT_TZ)
+                primary_id = id_variants[0] if id_variants else str(info.get("match_id") or key)
                 settled_record = {
-                    "match_id": m_id_raw,
+                    "match_id": primary_id,
                     "channel_key": t_type,
                     "msg_id": mid,
                     "published_at_utc": pub_time_str,
@@ -2727,7 +2744,7 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                     "net_units": net_u
                 }
                 record_settled_tip(settled_record)
-                update_live_audit_result(m_id_raw, res_status)
+                update_live_audit_result(primary_id, res_status)
 
                 del cache[key]
                 save_published_tips_cache(cache)

@@ -173,45 +173,56 @@ def run_end_to_end_test():
     }
 
     # 4. Mock JarBet client that provides clean history for exact match IDs
+    class MockResponse:
+        def __init__(self, data):
+            self.status_code = 200
+            self._data = data
+        def json(self):
+            return self._data
+
     class MockJarBetClient:
+        def _execute_request(self, method, endpoint, params=None):
+            p = (params or {}).get("homeName", "").lower()
+            if "bomb1to" in p or "a1ose" in p:
+                return MockResponse([
+                    {
+                        "idMatchBet365": "202030898",
+                        "_id": "66f8a001",
+                        "status": "FINISHED",
+                        "isFinished": True,
+                        "home": {"teamName": "Netherlands", "name": "Bomb1to", "goals": 4},
+                        "away": {"teamName": "Germany", "name": "A1ose", "goals": 4}
+                    }
+                ])
+            elif "uncle" in p or "mko1919" in p:
+                return MockResponse([
+                    {
+                        "idMatchBet365": "202030927",
+                        "_id": "66f8a002",
+                        "status": "FINISHED",
+                        "isFinished": True,
+                        "home": {"teamName": "Morocco", "name": "Uncle", "goals": 2},
+                        "away": {"teamName": "Belgium", "name": "mko1919", "goals": 1}
+                    }
+                ])
+            elif "zt" in p or "mj" in p:
+                return MockResponse([
+                    {
+                        "idMatchBet365": "202037547",
+                        "_id": "66f8a003",
+                        "status": "FINISHED",
+                        "isFinished": True,
+                        "home": {"teamName": "Aston Villa", "name": "ZT", "goals": 1},
+                        "away": {"teamName": "Tottenham", "name": "MJ", "goals": 1}
+                    }
+                ])
+            return MockResponse([])
+
         def get_fifa_history(self):
-            return [
-                {
-                    "idMatchBet365": "202030898",
-                    "_id": "66f8a001",
-                    "status": "FINISHED",
-                    "isFinished": True,
-                    "home": {"teamName": "Netherlands", "name": "Bomb1to", "goals": 4},
-                    "away": {"teamName": "Germany", "name": "A1ose", "goals": 4}
-                },
-                {
-                    "idMatchBet365": "202030927",
-                    "_id": "66f8a002",
-                    "status": "FINISHED",
-                    "isFinished": True,
-                    "home": {"teamName": "Morocco", "name": "Uncle", "goals": 2},
-                    "away": {"teamName": "Belgium", "name": "mko1919", "goals": 1}
-                },
-                {
-                    "idMatchBet365": "202037547",
-                    "_id": "66f8a003",
-                    "status": "FINISHED",
-                    "isFinished": True,
-                    "home": {"teamName": "Aston Villa", "name": "ZT", "goals": 1},
-                    "away": {"teamName": "Tottenham", "name": "MJ", "goals": 1}
-                }
-            ]
+            return []
+
         def get_ebasket_history(self):
-            return [
-                {
-                    "idMatchBet365": "EB2020501",
-                    "_id": "66f8b001",
-                    "status": "FINISHED",
-                    "isFinished": True,
-                    "home": {"goals": 88},
-                    "away": {"goals": 72}
-                }
-            ]
+            return []
 
     # Execute settlement cycle
     mock_client = MockJarBetClient()
