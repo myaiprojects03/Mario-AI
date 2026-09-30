@@ -70,6 +70,7 @@ def diagnose():
         return
 
     found_matches = []
+    # 2a. Check /history/ebasket/pre
     for player in ["COMBO", "UNFORGIVEN"]:
         for param in ["homeName", "awayName"]:
             try:
@@ -81,13 +82,37 @@ def diagnose():
                         for m in matches:
                             b365 = str(m.get("idMatchBet365") or m.get("bet365_id") or "")
                             mid = str(m.get("_id") or m.get("id") or "")
-                            h_name = str(m.get("home", {}).get("name", "")).upper()
-                            a_name = str(m.get("away", {}).get("name", "")).upper()
-                            
-                            if "26858304" in b365 or "26858304" in mid or ("COMBO" in h_name and "UNFORGIVEN" in a_name) or ("UNFORGIVEN" in h_name and "COMBO" in a_name):
+                            if "202091064" in b365 or "202091064" in mid or "26858304" in b365 or "26858304" in mid:
+                                m["_source_endpoint"] = f"/history/ebasket/pre ({param}={player})"
                                 found_matches.append(m)
             except Exception as ex:
                 print(f"  • API error for {player} ({param}): {ex}")
+
+    # 2b. Check /matches/ebasket/pre (live / recent matches)
+    try:
+        live_pre = client.get_ebasket_pre()
+        if isinstance(live_pre, list):
+            for m in live_pre:
+                b365 = str(m.get("idMatchBet365") or m.get("bet365_id") or "")
+                mid = str(m.get("_id") or m.get("id") or "")
+                if "202091064" in b365 or "202091064" in mid or "26858304" in b365 or "26858304" in mid:
+                    m["_source_endpoint"] = "/matches/ebasket/pre"
+                    found_matches.append(m)
+    except Exception as e:
+        print(f"  • Error querying /matches/ebasket/pre: {e}")
+
+    # 2c. Check /matches/ebasket/history
+    try:
+        hist = client.get_ebasket_history()
+        if isinstance(hist, list):
+            for m in hist:
+                b365 = str(m.get("idMatchBet365") or m.get("bet365_id") or "")
+                mid = str(m.get("_id") or m.get("id") or "")
+                if "202091064" in b365 or "202091064" in mid or "26858304" in b365 or "26858304" in mid:
+                    m["_source_endpoint"] = "/matches/ebasket/history"
+                    found_matches.append(m)
+    except Exception as e:
+        print(f"  • Error querying /matches/ebasket/history: {e}")
 
     if found_matches:
         print(f"[API MATCH FOUND] Found {len(found_matches)} match entry in API feed:")
