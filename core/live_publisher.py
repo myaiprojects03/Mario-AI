@@ -2518,14 +2518,21 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                                         continue
 
                                     m_status = str(m.get("status") or m.get("state") or "").upper()
-                                    is_finished = m.get("isFinished") is True or m_status in ["ENDED", "FINISHED", "FT", "CLOSED"]
-                                    if not is_finished:
+                                    if m.get("isFinished") is False or m_status in ["LIVE", "IN_PLAY", "FIRST_HALF", "SECOND_HALF"]:
                                         continue
 
                                     home_obj = m.get("home", {}) if isinstance(m.get("home"), dict) else {}
                                     away_obj = m.get("away", {}) if isinstance(m.get("away"), dict) else {}
                                     h_g = home_obj.get("goals") if home_obj.get("goals") is not None else home_obj.get("score")
                                     a_g = away_obj.get("goals") if away_obj.get("goals") is not None else away_obj.get("score")
+
+                                    is_finished = (
+                                        m.get("isFinished") is True
+                                        or m_status in ["ENDED", "FINISHED", "FT", "CLOSED"]
+                                        or (h_g is not None and a_g is not None)
+                                    )
+                                    if not is_finished:
+                                        continue
 
                                     if h_g is not None and a_g is not None:
                                         try:
