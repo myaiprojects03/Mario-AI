@@ -1201,8 +1201,10 @@ def parse_tip_timestamp_brt(raw_ts: Any) -> datetime:
 def get_today_published_tip_count(channel_key: str, dt_brt=None) -> int:
     """
     Returns the exact count of tips ACTUALLY delivered today for this channel.
-    Only counts authentic tips (settled today + genuinely in-play pending).
-    Zero phantom entries, zero auto-sync pollution from historical backfills.
+    Authoritative count merges:
+    1. Permanent daily tip ledger (daily_tip_ledger.json and PostgreSQL core.daily_tip_ledger)
+    2. Real settled tips ledger (settled_tips_ledger.json)
+    3. Live in-play pending tips cache (published_tips_cache.json)
     """
     if not dt_brt:
         dt_brt = datetime.now(BRT_TZ)
@@ -1221,32 +1223,62 @@ def get_today_published_tip_count(channel_key: str, dt_brt=None) -> int:
     elif channel_key in ["fifa_money_line", "fifa_ml"]:
         equivalent_keys.update(["fifa_money_line", "fifa_ml"])
 
-    # 1. Real settled tips published today
-    all_settled = load_settled_tips_ledger()
-    today_settled = [
-        it for it in all_settled
-        if it.get("channel_key") in equivalent_keys and str(it.get("date_brt", "")).startswith(today_str)
-    ]
-    today_settled_ids = {str(it.get("match_id")) for it in today_settled if it.get("match_id")}
+    all_dispatched_ids = set()
 
-    # 2. Genuine in-play pending tips published today (all tips broadcast on today_str)
-    cache = load_published_tips_cache()
-    pending_ids = set()
-    if isinstance(cache, dict):
-        for key, item in cache.items():
-            if not isinstance(item, dict):
-                continue
-            item_type = str(item.get("type", "")).lower()
-            if item_type in equivalent_keys:
-                m_id = str(item.get("match_id") or key)
-                if m_id not in today_settled_ids:
+    # 1. Authoritative Daily Ledger (Filesystem)
+    try:
+        daily_ledger = load_daily_tip_ledger()
+        if today_str in daily_ledger and isinstance(daily_ledger[today_str], dict):
+            for eq_k in equivalent_keys:
+                if eq_k in daily_ledger[today_str] and isinstance(daily_ledger[today_str][eq_k], list):
+                    all_dispatched_ids.update([str(m) for m in daily_ledger[today_str][eq_k]])
+    except Exception:
+        pass
+
+    # 2. Authoritative Database Daily Ledger
+    try:
+        conn = get_db_connection()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT match_id FROM core.daily_tip_ledger 
+                    WHERE date_brt = %s AND channel_key = ANY(%s)
+                """, (today_str, list(equivalent_keys)))
+                for row in cur.fetchall():
+                    if row and row[0]:
+                        all_dispatched_ids.add(str(row[0]))
+            conn.close()
+    except Exception:
+        pass
+
+    # 3. Real settled tips published today
+    try:
+        all_settled = load_settled_tips_ledger()
+        for it in all_settled:
+            if it.get("channel_key") in equivalent_keys and str(it.get("date_brt", "")).startswith(today_str):
+                if it.get("match_id"):
+                    all_dispatched_ids.add(str(it["match_id"]))
+    except Exception:
+        pass
+
+    # 4. Live in-play pending tips published today
+    try:
+        cache = load_published_tips_cache()
+        if isinstance(cache, dict):
+            for key, item in cache.items():
+                if not isinstance(item, dict):
+                    continue
+                item_type = str(item.get("type", "")).lower()
+                if item_type in equivalent_keys:
+                    m_id = str(item.get("match_id") or key)
                     raw_ts = item.get("published_at_utc") or item.get("timestamp")
                     dt_tip_brt = parse_tip_timestamp_brt(raw_ts)
                     if dt_tip_brt and dt_tip_brt.strftime("%Y-%m-%d") == today_str:
-                        pending_ids.add(m_id)
+                        all_dispatched_ids.add(m_id)
+    except Exception:
+        pass
 
-    dispatched_today = today_settled_ids.union(pending_ids)
-    return len(dispatched_today)
+    return len(all_dispatched_ids)
 
 
 def is_daily_limit_reached(channel_key: str) -> bool:
