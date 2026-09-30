@@ -1700,7 +1700,8 @@ class ChannelDispatchRateLimiter:
                     break
 
                 # 4. Dispatch Telegram Message
-                msg_id = send_telegram_tip(target_bot_token, channel_id, msg_text, m_key)
+                target_channel_id = cand.get("channel_id") or cand.get("channel") or channel_id
+                msg_id = send_telegram_tip(target_bot_token, target_channel_id, msg_text, m_key)
                 if msg_id:
                     self.record_dispatch(m_key, now_ts)
                     state["queue"].pop(0)
@@ -1716,8 +1717,8 @@ class ChannelDispatchRateLimiter:
                         "fixture": fixture_str,
                         "published_at_utc": now_utc.isoformat(),
                         "msg_id": msg_id,
-                        "channel_id": channel_id,
-                        "channel": channel_id,
+                        "channel_id": target_channel_id,
+                        "channel": target_channel_id,
                         "token": target_bot_token,
                         "bot_token": target_bot_token,
                         "msg_text": msg_text,
@@ -2649,7 +2650,7 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
             continue
 
         tok = info.get("token") or info.get("bot_token") or bot_token
-        ch = info.get("channel") or info.get("channel_id")
+        ch = info.get("channel") or info.get("channel_id") or CHANNEL_MAP.get(info.get("type", ""))
         mid = info.get("msg_id")
         msg_text = info.get("msg_text")
 

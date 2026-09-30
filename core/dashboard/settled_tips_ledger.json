@@ -1,0 +1,87 @@
+[
+  {
+    "match_id": "m1",
+    "channel_key": "ebasket_ou",
+    "date_brt": "2026-09-18",
+    "settled_at_brt": "2026-09-18 02:00:00 BRT",
+    "outcome": "WIN",
+    "odds": 1.9,
+    "net_units": 0.9
+  },
+  {
+    "match_id": "m2",
+    "channel_key": "ebasket_ou",
+    "date_brt": "2026-09-18",
+    "settled_at_brt": "2026-09-18 04:00:00 BRT",
+    "outcome": "LOSS",
+    "odds": 1.9,
+    "net_units": -1.0
+  },
+  {
+    "match_id": "m3",
+    "channel_key": "ebasket_ou",
+    "date_brt": "2026-09-18",
+    "settled_at_brt": "2026-09-18 06:00:00 BRT",
+    "outcome": "LOSS",
+    "odds": 1.9,
+    "net_units": -1.0
+  },
+  {
+    "match_id": "m4",
+    "channel_key": "ebasket_ou",
+    "date_brt": "2026-09-18",
+    "settled_at_brt": "2026-09-18 08:00:00 BRT",
+    "outcome": "LOSS",
+    "odds": 1.9,
+    "net_units": -1.0
+  },
+  {
+    "match_id": "test_mid_persist_123",
+    "channel_key": "ebasket_ou",
+    "home_team": "Lakers (James)",
+    "away_team": "Warriors (Curry)",
+    "market_type": "ebasket_ou",
+    "pick_str": "Mais de 150.5 Pontos",
+    "odds": 1.85,
+    "line": 150.5,
+    "side": "over",
+    "score": "80-75",
+    "score_str": "80-75",
+    "outcome": "WON",
+    "net_units": 0.85,
+    "date_brt": "2026-09-18",
+    "settled_at_brt": "2026-09-18 17:13:49.601709+05:00"
+  },
+  {
+    "match_id": "6a800b651f945fd24230e8fb",
+    "channel_key": "ebasket_ou",
+    "msg_id": 101,
+    "published_at_utc": "2026-09-21T11:24:46.169866+00:00",
+    "settled_at_brt": "2026-09-21 09:09:47 BRT",
+    "date_brt": "2026-09-21",
+    "fixture": " x ",
+    "market_type": "ebasket_ou",
+    "side": "over",
+    "line": 120.5,
+    "odds": 1.85,
+    "final_score": "76-48",
+    "outcome": "WIN",
+    "net_units": 0.85
+  },
+  {
+    "match_id": "6a800fd65291b52e5bc87f44",
+    "channel_key": "fifa_ou",
+    "msg_id": 102,
+    "published_at_utc": "2026-09-21T11:24:46.169886+00:00",
+    "settled_at_brt": "2026-09-21 09:09:47 BRT",
+    "date_brt": "2026-09-21",
+    "fixture": " x ",
+    "market_type": "fifa_ou",
+    "side": "over",
+    "line": 5.5,
+    "odds": 1.9,
+    "final_score": "2-5",
+    "outcome": "WIN",
+    "net_units": 0.9
+  }
+]

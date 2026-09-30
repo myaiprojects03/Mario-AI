@@ -63,6 +63,8 @@ def run_daily_limit_tests():
     lp.load_daily_tip_ledger = lambda: mock_ledger
     lp.load_settled_tips_ledger = lambda: []
     lp.load_published_tips_cache = lambda: {}
+    orig_get_db = lp.get_db_connection
+    lp.get_db_connection = lambda: None
 
     # Under limit check
     assert is_daily_limit_reached("fifa_asian_handicap") == False, "At 99/100, Asian Handicap must NOT be blocked"
@@ -104,6 +106,8 @@ def run_daily_limit_tests():
     assert len(intercepted_dispatches) == 0, "No telegram message should be sent when cap is reached!"
     assert len(limiter.get_channel_state("fifa_asian_handicap")["queue"]) == 0, "Candidate must be popped and dropped from queue!"
     print("• RateLimiter Cap Drop Execution                     : PASS (Candidate dropped, 0 messages sent)")
+
+    lp.get_db_connection = orig_get_db
 
     print("\n" + "=" * 110)
     print(" [ALL DAILY CAP TESTS PASSED: 100% SUCCESS]")
