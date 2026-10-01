@@ -13,8 +13,12 @@ Supports running directly on server (Bare-metal, Systemd, or Docker).
 
 import os
 import sys
+import os
+import sys
 import json
 import re
+import shutil
+import subprocess
 import argparse
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional, Tuple
@@ -30,7 +34,39 @@ try:
 except ImportError:
     pass
 
-import psycopg2
+# Try importing psycopg2. If missing on host, auto-delegate to running Docker container!
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None
+
+if psycopg2 is None and os.getenv("RUNNING_INSIDE_CONTAINER") != "1":
+    if shutil.which("docker"):
+        try:
+            res = subprocess.run(["docker", "ps", "--format", "{{.Names}}"], capture_output=True, text=True)
+            names = res.stdout.splitlines()
+            target_container = None
+            for candidate in ["mario_ai_live_publisher", "mario_ai_dashboard"]:
+                if candidate in names:
+                    target_container = candidate
+                    break
+            if not target_container:
+                for n in names:
+                    if "publisher" in n or ("mario" in n and "db" not in n):
+                        target_container = n
+                        break
+            
+            if target_container:
+                print(f"[INFO] Host Python is missing psycopg2. Running audit seamlessly inside container '{target_container}'...")
+                with open(os.path.abspath(__file__), "rb") as f:
+                    script_bytes = f.read()
+                ret = subprocess.run(
+                    ["docker", "exec", "-i", "-e", "RUNNING_INSIDE_CONTAINER=1", target_container, "python", "-"] + sys.argv[1:],
+                    input=script_bytes
+                )
+                sys.exit(ret.returncode)
+        except Exception as dock_err:
+            pass
 
 CHANNEL_NAMES = {
     "fifa_goals_ou": "FIFA Goals Over/Under",
@@ -427,7 +463,7 @@ def print_and_save_audit_report(tips_by_channel: Dict[str, List[Dict[str, Any]]]
 
     # Print Terminal Dashboard
     print("\n" + "=" * 80)
-    print("           5-CHANNEL AUDIT SUMMARY REPORT")
+    print("           5-CHANNEL AUDIT SUMMARY REPORT (CLIENT COMPLIANCE)")
     print("=" * 80)
     print(f"{'Channel':<30} | {'Reviewed':<8} | {'Correct':<8} | {'Incorrect':<9} | {'Pending':<8} | {'Accuracy':<8}")
     print("-" * 80)
