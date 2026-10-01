@@ -747,7 +747,7 @@ def save_published_tips_cache(cache_dict: Dict[str, Any]):
     try:
         cache_file = os.path.join(os.path.dirname(__file__), "dashboard", "published_tips_cache.json")
         with open(cache_file, "w", encoding="utf-8") as f:
-            json.dump(cache_dict, f, indent=2)
+            json.dump(cache_dict, f, indent=2, default=str)
     except Exception as e:
         logger.warning(f"Error saving published_tips_cache.json: {e}")
 
@@ -1036,6 +1036,38 @@ def record_published_tip_to_db(record: Dict[str, Any]) -> bool:
                 pub_utc,
                 ko_utc
             ))
+
+            # Ensure core.matches entry exists to satisfy Foreign Key constraints for core.results
+            try:
+                fix_str = str(record.get("fixture", ""))
+                teams_parts = fix_str.split(" x ") if " x " in fix_str else ["Home", "Away"]
+                h_team_name = teams_parts[0].strip() or "Home"
+                a_team_name = teams_parts[1].strip() if len(teams_parts) > 1 else "Away"
+                m_id_str = str(record.get("match_id", ""))
+                cur.execute("""
+                    INSERT INTO core.matches (
+                        match_id, sport, league, home_player, away_player, home_team, away_team, match_start_time, source, raw_payload
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, 'live_publisher', %s
+                    )
+                    ON CONFLICT (match_id) DO UPDATE SET
+                        sport = EXCLUDED.sport,
+                        home_player = EXCLUDED.home_player,
+                        away_player = EXCLUDED.away_player;
+                """, (
+                    m_id_str,
+                    str(record.get("sport", "fifa")),
+                    str(record.get("league", "eSports")),
+                    str(record.get("home_player", "")),
+                    str(record.get("away_player", "")),
+                    h_team_name,
+                    a_team_name,
+                    ko_utc or pub_utc,
+                    json.dumps({"idMatchBet365": m_id_str})
+                ))
+            except Exception as match_ins_err:
+                logger.debug(f"core.matches upsert note: {match_ins_err}")
+
             conn.commit()
             return True
     except Exception as e:
@@ -1098,12 +1130,119 @@ def load_pending_tips_from_db() -> Dict[str, Dict[str, Any]]:
     return pending
 
 
-def update_published_tip_settled_in_db(match_id: str, channel_key: str, outcome: str, final_score: str, net_units: float) -> bool:
+def is_tip_already_published(
+    channel_key: str,
+    match_id: str,
+    fixture: str,
+    link_url: str = "",
+    cache: Optional[Dict[str, Any]] = None,
+    b365_event_id: Optional[str] = None
+) -> bool:
+    """
+    Multi-Layer Production Deduplication Engine:
+    Guarantees that the same match/fixture can NEVER be published more than once to the same channel.
+    Checks:
+    1. Direct match_id & Bet365 event ID in in-memory cache.
+    2. Exact match_link URL in in-memory cache.
+    3. Same fixture name currently pending or published within 3 hours in cache.
+    4. PostgreSQL core.published_tips (Database Source of Truth) by match_id, Bet365 ID, link, or recent fixture (< 3 hours).
+    """
+    m_id = str(match_id or "").strip()
+    ev_id = str(b365_event_id or "").strip()
+    fix_norm = re.sub(r'\s+', ' ', str(fixture or "")).strip().lower()
+    ch_key = str(channel_key or "").strip()
+
+    # 1. In-Memory Cache Check
+    if cache and isinstance(cache, dict):
+        if m_id and f"{m_id}_{ch_key}" in cache:
+            return True
+        if ev_id and f"{ev_id}_{ch_key}" in cache:
+            return True
+
+        for k, info in cache.items():
+            if not isinstance(info, dict):
+                continue
+            entry_ch = str(info.get("type") or info.get("channel_key") or "")
+            if entry_ch != ch_key:
+                continue
+
+            entry_mid = str(info.get("match_id") or "").strip()
+            entry_link = str(info.get("match_link") or info.get("link_url") or "")
+            entry_fix = re.sub(r'\s+', ' ', str(info.get("fixture") or "")).strip().lower()
+
+            # ID matches
+            if m_id and (entry_mid == m_id or normalize_match_id(entry_mid) == normalize_match_id(m_id)):
+                return True
+            if ev_id and (entry_mid == ev_id or ev_id in entry_link or normalize_match_id(entry_mid) == ev_id):
+                return True
+
+            # URL matches
+            if link_url and entry_link and link_url in entry_link:
+                return True
+
+            # Fixture matches (within 3 hours or pending)
+            if fix_norm and entry_fix and fix_norm == entry_fix:
+                pub_ts = info.get("published_at_utc")
+                if not pub_ts:
+                    return True
+                try:
+                    dt_p = datetime.fromisoformat(str(pub_ts).replace("Z", "+00:00"))
+                    if (datetime.now(timezone.utc) - dt_p).total_seconds() < 10800:
+                        return True
+                except Exception:
+                    return True
+
+    # 2. Database-First Verification (PostgreSQL core.published_tips)
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT 1 FROM core.published_tips
+                    WHERE channel_key = %s
+                      AND (
+                          (%s <> '' AND match_id = %s)
+                          OR (%s <> '' AND match_id = %s)
+                          OR (%s <> '' AND match_link LIKE %s)
+                          OR (
+                              %s <> '' AND fixture ILIKE %s 
+                              AND published_at_utc > NOW() - INTERVAL '3 hours'
+                          )
+                      )
+                    LIMIT 1;
+                """, (
+                    ch_key,
+                    m_id, m_id,
+                    ev_id, ev_id,
+                    ev_id, f"%{ev_id}%" if ev_id else "",
+                    fix_norm, f"%{fix_norm}%"
+                ))
+                if cur.fetchone():
+                    return True
+        except Exception as db_err:
+            logger.debug(f"DB deduplication check note: {db_err}")
+        finally:
+            try: conn.close()
+            except Exception: pass
+
+    return False
+
+
+def update_published_tip_settled_in_db(match_id: str, channel_key: str, outcome: str, final_score: str, net_units: float, alt_ids: list = None) -> bool:
     """Updates a tip's settlement status, score, and net units in PostgreSQL core.published_tips."""
     conn = get_db_connection()
     if not conn:
         return False
     try:
+        norm_id = str(match_id).lstrip('E').lstrip('e')
+        all_ids = set([str(match_id), norm_id, f"E{norm_id}"])
+        if alt_ids:
+            for aid in alt_ids:
+                if aid:
+                    s_aid = str(aid)
+                    all_ids.add(s_aid)
+                    all_ids.add(s_aid.lstrip('E').lstrip('e'))
+                    all_ids.add(f"E{s_aid.lstrip('E').lstrip('e')}")
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE core.published_tips
@@ -1112,8 +1251,9 @@ def update_published_tip_settled_in_db(match_id: str, channel_key: str, outcome:
                     final_score = %s,
                     net_units = %s,
                     settled_at_utc = NOW()
-                WHERE match_id = %s AND channel_key = %s;
-            """, (outcome, final_score, net_units, match_id, channel_key))
+                WHERE (match_id = ANY(%s) OR TRIM(LEADING 'E' FROM match_id) = %s)
+                  AND channel_key = %s;
+            """, (outcome, final_score, net_units, list(all_ids), norm_id, channel_key))
             conn.commit()
             return True
     except Exception as e:
@@ -1136,10 +1276,13 @@ def parse_tip_selection_from_msg_text(msg_text: str, channel_type: str = "") -> 
         return None, None
 
     bet_line = ""
+    fixture_text = ""
     for line in msg_text.splitlines():
-        if line.strip().startswith("Bet:"):
-            bet_line = line.strip()[4:].strip()
-            break
+        line_s = line.strip()
+        if line_s.startswith("Bet:"):
+            bet_line = line_s[4:].strip()
+        elif line_s.startswith("Teams/Match:"):
+            fixture_text = line_s[12:].strip()
 
     if not bet_line:
         return None, None
@@ -1156,34 +1299,48 @@ def parse_tip_selection_from_msg_text(msg_text: str, channel_type: str = "") -> 
         if m:
             return "under", float(m.group(1))
 
-    # 2. Asian Handicap
-    m_ah = re.search(r'\(([+-]?[0-9.]+)\)', bet_line)
-    if m_ah:
-        line_val = float(m_ah.group(1))
-        for line in msg_text.splitlines():
-            if line.strip().startswith("Teams/Match:"):
-                fixture_text = line.strip()[12:].strip()
-                if " x " in fixture_text:
-                    h_part, a_part = fixture_text.split(" x ", 1)
-                    team_bet = bet_line.split("(")[0].strip().lower()
-                    if team_bet in h_part.lower():
-                        return "home", line_val
-                    elif team_bet in a_part.lower():
-                        return "away", line_val
-        return "home", line_val
+    h_part, a_part = "", ""
+    if " x " in fixture_text:
+        h_part, a_part = fixture_text.split(" x ", 1)
+        h_part, a_part = h_part.strip().lower(), a_part.strip().lower()
 
-    # 3. Money Line / 1X2
-    if "resultado final" in bet_lower or "money line" in bet_lower or "(dnb)" in bet_lower:
-        for line in msg_text.splitlines():
-            if line.strip().startswith("Teams/Match:"):
-                fixture_text = line.strip()[12:].strip()
-                if " x " in fixture_text:
-                    h_part, a_part = fixture_text.split(" x ", 1)
-                    team_bet = bet_line.replace("(DNB)", "").strip().lower()
-                    if team_bet in h_part.lower():
-                        return "home", 0.0
-                    elif team_bet in a_part.lower():
-                        return "away", 0.0
+    # 2. Asian Handicap
+    # e.g., "Morocco (Uncle) (Handicap Asiático -0.5)", "Belgium (mko1919) (Handicap Asiático +0.5)", "Morocco -0.5"
+    if "handicap" in bet_lower or "asiático" in bet_lower or "asiatico" in bet_lower or re.search(r'\([+-]?[0-9.]+\)', bet_line):
+        m_ah = re.search(r'([+-]?[0-9.]+)\s*\)?$', bet_line.strip())
+        if not m_ah:
+            m_ah = re.search(r'\(\s*(?:handicap\s+asi[aá]tico\s*)?([+-]?[0-9.]+)\s*\)', bet_line, re.IGNORECASE)
+        if m_ah:
+            line_val = float(m_ah.group(1))
+            # Clean team name by stripping off the handicap portion
+            cleaned_team = re.split(r'\(|\bhandicap\b', bet_line, flags=re.IGNORECASE)[0].strip().lower()
+            if h_part and (cleaned_team in h_part or h_part in cleaned_team):
+                return "home", line_val
+            elif a_part and (cleaned_team in a_part or a_part in cleaned_team):
+                return "away", line_val
+            # If bet_line starts with team in h_part / a_part
+            if h_part and h_part in bet_lower:
+                return "home", line_val
+            elif a_part and a_part in bet_lower:
+                return "away", line_val
+            return "home", line_val
+
+    # 3. Money Line / 1X2 / Draw No Bet (Empate Anula / Resultado Final / DNB)
+    if "resultado final" in bet_lower or "money line" in bet_lower or "dnb" in bet_lower or "empate anula" in bet_lower:
+        # Strip all qualifiers to isolate team name
+        cleaned_team = bet_line
+        for qual in ["(resultado final)", "resultado final", "(empate anula)", "empate anula", "(dnb)", "dnb", "(money line)", "money line"]:
+            cleaned_team = re.sub(re.escape(qual), "", cleaned_team, flags=re.IGNORECASE)
+        team_bet = cleaned_team.strip(" ()").strip().lower()
+        if h_part and (team_bet in h_part or h_part in team_bet):
+            return "home", 0.0
+        elif a_part and (team_bet in a_part or a_part in team_bet):
+            return "away", 0.0
+        # Direct fixture containment check
+        if h_part and h_part in bet_lower:
+            return "home", 0.0
+        elif a_part and a_part in bet_lower:
+            return "away", 0.0
 
     return None, None
 
@@ -1844,9 +2001,15 @@ class ChannelDispatchRateLimiter:
 
     def enqueue_candidate(self, channel_key: str, candidate: Dict[str, Any]):
         state = self.get_channel_state(channel_key)
-        m_id = str(candidate.get("match_id", ""))
+        m_id = str(candidate.get("match_id", "")).strip()
+        fixture = re.sub(r'\s+', ' ', str(candidate.get("fixture", ""))).strip().lower()
+        link_url = str(candidate.get("link_url", "")).strip()
+
         for existing in state["queue"]:
-            if str(existing.get("match_id", "")) == m_id:
+            ex_mid = str(existing.get("match_id", "")).strip()
+            ex_fix = re.sub(r'\s+', ' ', str(existing.get("fixture", ""))).strip().lower()
+            ex_link = str(existing.get("link_url", "")).strip()
+            if (m_id and ex_mid == m_id) or (fixture and ex_fix and ex_fix == fixture) or (link_url and ex_link and ex_link == link_url):
                 return
         state["queue"].append(candidate)
 
@@ -1934,13 +2097,20 @@ class ChannelDispatchRateLimiter:
                     )
                     continue
 
-                # 3. Channel Rate Limit Slot Check
+                # 3. Pre-Dispatch Duplicate Protection Gate (Checks DB & Cache)
+                fixture_clean = str(fixture_str).strip()
+                if is_tip_already_published(m_key, m_id, fixture_clean, link_url, cache):
+                    logger.info(f"RateLimiter: Dropping duplicate candidate for {fixture_clean} on {m_key}")
+                    state["queue"].pop(0)
+                    continue
+
+                # 4. Channel Rate Limit Slot Check
                 can_dispatch, wait_secs = self.can_dispatch_now(m_key, now_ts)
                 if not can_dispatch:
                     logger.debug(f"RateLimiter: Channel {m_key} locked for {wait_secs:.1f}s. Queued {len(state['queue'])} items.")
                     break
 
-                # 4. Dispatch Telegram Message
+                # 5. Dispatch Telegram Message
                 target_channel_id = cand.get("channel_id") or cand.get("channel") or channel_id
                 msg_id = send_telegram_tip(target_bot_token, target_channel_id, msg_text, m_key)
                 if msg_id:
@@ -2501,7 +2671,19 @@ def run_live_publisher_cycle(bot_token: Optional[str] = None):
         if not isinstance(match, dict):
             continue
 
-        match_id = str(match.get("idMatchBet365") or match.get("_id") or match.get("id") or "")
+        raw_url = str(match.get("url") or match.get("link") or "").strip()
+        url_b365_id = None
+        if raw_url:
+            m_ev = re.search(r'/E(\d{6,12})/', raw_url) or re.search(r'EV(\d{6,12})', raw_url) or re.search(r'E(\d{7,10})', raw_url)
+            if m_ev:
+                url_b365_id = m_ev.group(1)
+
+        raw_match_id = str(match.get("idMatchBet365") or match.get("_id") or match.get("id") or "").strip()
+        # Prefer official Bet365 event ID (from field or from URL) over ephemeral Mongo IDs
+        match_id = str(match.get("idMatchBet365") or url_b365_id or raw_match_id or "").strip()
+        if not match_id and url_b365_id:
+            match_id = url_b365_id
+
         league = str(match.get("league") or match.get("tournament") or "eSports GT League")
         sport = str(match.get("_sport_type") or match.get("sport") or "fifa").lower()
 
@@ -2523,11 +2705,10 @@ def run_live_publisher_cycle(bot_token: Optional[str] = None):
         else:
             away_team = str(match.get("awayTeam") or match.get("away_team") or match.get("away") or "Away")
 
-        raw_url = match.get("url") or match.get("link")
-        if raw_url and str(raw_url).startswith("/"):
+        if raw_url and raw_url.startswith("/"):
             link_url = f"https://www.bet365.com#{raw_url}"
-        elif raw_url and str(raw_url).startswith("http"):
-            link_url = str(raw_url).replace("www.bet365.bet.br", "www.bet365.com").replace("bet365.bet.br", "bet365.com")
+        elif raw_url and raw_url.startswith("http"):
+            link_url = raw_url.replace("www.bet365.bet.br", "www.bet365.com").replace("bet365.bet.br", "bet365.com")
         elif match_id:
             link_url = f"https://www.bet365.com/#/IP/EV{match_id}"
         else:
@@ -2540,17 +2721,19 @@ def run_live_publisher_cycle(bot_token: Optional[str] = None):
         else:
             target_markets = ["fifa_goals_ou", "fifa_asian_handicap", "fifa_money_line"]
 
+        fixture_clean = f"{home_team} x {away_team}".strip()
+
         for m_key in target_markets:
             channel_id = CHANNEL_MAP.get(m_key)
-            cache_key = f"{match_id}_{m_key}" if match_id else None
-
-            if cache_key and cache_key in cache:
-                continue
             if not channel_id:
                 continue
 
             if is_daily_limit_reached(m_key):
                 logger.info(f"Daily tip limit reached for channel {m_key}. Skipping.")
+                continue
+
+            # Strict Multi-Layer Deduplication (checks in-memory cache AND PostgreSQL core.published_tips)
+            if is_tip_already_published(m_key, match_id, fixture_clean, link_url, cache, url_b365_id):
                 continue
 
             MIN_ODDS = 1.60
@@ -2831,18 +3014,20 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                                             or m_status in ["ENDED", "FINISHED", "FT", "CLOSED"]
                                         )
                                         # If status is omitted by API, only accept if match has played its full duration
+                                        # If status is omitted by API, only accept if match has played its full duration
                                         if not is_finished and h_g is not None and a_g is not None:
                                             started_str = m.get("startedAt")
                                             if started_str:
                                                 try:
                                                     s_dt = datetime.fromisoformat(started_str.replace("Z", "+00:00"))
-                                                    min_duration = 480 if not is_ebasket else 900  # 8 mins for FIFA, 15 mins for eBasket
+                                                    # Real elapsed match time: 15 mins for FIFA (8m play + breaks + buffer), 30 mins for eBasketball (20m play + clock stops + breaks)
+                                                    min_duration = 900 if not is_ebasket else 1800
                                                     if (now_dt - s_dt).total_seconds() >= min_duration:
                                                         is_finished = True
                                                 except Exception:
                                                     is_finished = True
                                             else:
-                                                is_finished = True
+                                                is_finished = False
 
                                         if not is_finished:
                                             continue
@@ -2851,7 +3036,9 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                                             try:
                                                 fh = float(h_g)
                                                 fa = float(a_g)
-                                                score_pair = (fh, fa)
+                                                feed_h_name = str(home_obj.get("name") or home_obj.get("team") or "").lower()
+                                                feed_a_name = str(away_obj.get("name") or away_obj.get("team") or "").lower()
+                                                score_pair = (fh, fa, feed_h_name, feed_a_name)
                                                 if is_ebasket:
                                                     if (fh + fa) >= 45.0 and fh >= 15.0 and fa >= 15.0:
                                                         if b365_id:
@@ -2876,6 +3063,45 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                             logger.debug(f"History query note for player {player} ({sport_tag}): {api_err}")
         except Exception as query_ex:
             logger.debug(f"API query cycle note: {query_ex}")
+
+    # 1b. Immediately store proper and final verified results into PostgreSQL (core.matches & core.results)
+    if pending_ids_list:
+        try:
+            conn_persist = get_db_connection()
+            if conn_persist:
+                with conn_persist.cursor() as cur_p:
+                    all_api_discovered = list(fifa_db_results.items()) + list(ebasket_db_results.items())
+                    for v_id, s_tuple in all_api_discovered:
+                        fh, fa = s_tuple[0], s_tuple[1]
+                        h_p_name, a_p_name = s_tuple[2], s_tuple[3]
+                        sport_tag = "ebasket" if (fh + fa) >= 45.0 else "fifa"
+                        # Ensure core.matches entry exists for foreign key integrity
+                        cur_p.execute("""
+                            INSERT INTO core.matches (
+                                match_id, sport, league, home_player, away_player, home_team, away_team, match_start_time, source, raw_payload
+                            ) VALUES (
+                                %s, %s, 'eSports', %s, %s, 'Home', 'Away', NOW() - INTERVAL '20 minutes', 'jarbet_verified', %s
+                            )
+                            ON CONFLICT (match_id) DO UPDATE SET
+                                home_player = COALESCE(EXCLUDED.home_player, core.matches.home_player),
+                                away_player = COALESCE(EXCLUDED.away_player, core.matches.away_player);
+                        """, (str(v_id), sport_tag, str(h_p_name), str(a_p_name), json.dumps({"idMatchBet365": str(v_id)})))
+
+                        # Upsert verified score into core.results
+                        cur_p.execute("""
+                            INSERT INTO core.results (match_id, final_home_score, final_away_score, settled_at, settlement_source)
+                            SELECT %s, %s, %s, NOW(), 'jarbet_verified'
+                            WHERE NOT EXISTS (SELECT 1 FROM core.results WHERE match_id = %s);
+                        """, (str(v_id), int(fh), int(fa), str(v_id)))
+                        cur_p.execute("""
+                            UPDATE core.results 
+                            SET final_home_score = %s, final_away_score = %s, settled_at = NOW(), settlement_source = 'jarbet_verified'
+                            WHERE match_id = %s;
+                        """, (int(fh), int(fa), str(v_id)))
+                conn_persist.commit()
+                conn_persist.close()
+        except Exception as p_err:
+            logger.debug(f"Direct DB persistence note: {p_err}")
 
     # 2. Query verified results table in PostgreSQL with normalized Match ID matching
     if pending_ids_list:
@@ -2908,7 +3134,9 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                            COALESCE(m.raw_payload->>'idMatchBet365', ''),
                            r.final_home_score, 
                            r.final_away_score,
-                           COALESCE(m.sport, '') as m_sport
+                           COALESCE(m.sport, '') as m_sport,
+                           COALESCE(m.home_player, m.home_team, '') as m_h_name,
+                           COALESCE(m.away_player, m.away_team, '') as m_a_name
                     FROM core.results r
                     LEFT JOIN core.matches m ON r.match_id = m.match_id
                     WHERE (
@@ -2920,10 +3148,10 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                       AND r.final_home_score IS NOT NULL AND r.final_away_score IS NOT NULL
                     ORDER BY r.id DESC
                 """, (pending_ids_list, pending_ids_list, pending_ids_list, pending_ids_list))
-                for r_mid, b365_id, h, a, m_sport in cur.fetchall():
+                for r_mid, b365_id, h, a, m_sport, m_h_name, m_a_name in cur.fetchall():
                     if h is not None and a is not None:
                         fh, fa = float(h), float(a)
-                        score_pair = (fh, fa)
+                        score_pair = (fh, fa, str(m_h_name or "").lower(), str(m_a_name or "").lower())
                         sport_str = str(m_sport).lower()
                         r_norm = normalize_match_id(r_mid)
                         b_norm = normalize_match_id(b365_id)
@@ -2947,16 +3175,32 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
 
                 # Persist verified finished scores discovered into core.results
                 all_discovered = list(fifa_db_results.items()) + list(ebasket_db_results.items())
-                for v_id, (fh, fa) in all_discovered:
-                    try:
-                        cur.execute("""
-                            INSERT INTO core.results (match_id, final_home_score, final_away_score, settled_at, settlement_source)
-                            SELECT %s, %s, %s, NOW(), 'jarbet_verified'
-                            WHERE EXISTS (SELECT 1 FROM core.matches WHERE match_id = %s)
-                              AND NOT EXISTS (SELECT 1 FROM core.results WHERE match_id = %s)
-                        """, (v_id, int(fh), int(fa), v_id, v_id))
-                    except Exception:
-                        pass
+                for v_id, s_tuple in all_discovered:
+                    fh, fa = s_tuple[0], s_tuple[1]
+                    norm_vid = str(v_id).lstrip('E').lstrip('e')
+                    target_ids = list(set([str(v_id), norm_vid, f"E{norm_vid}"]))
+                    for tid in target_ids:
+                        try:
+                            cur.execute("""
+                                INSERT INTO core.matches (
+                                    match_id, sport, league, source, raw_payload
+                                ) VALUES (
+                                    %s, 'eSports', 'eSports', 'jarbet_verified', %s
+                                )
+                                ON CONFLICT (match_id) DO NOTHING;
+                            """, (tid, json.dumps({"idMatchBet365": tid})))
+                            cur.execute("""
+                                INSERT INTO core.results (match_id, final_home_score, final_away_score, settled_at, settlement_source)
+                                SELECT %s, %s, %s, NOW(), 'jarbet_verified'
+                                WHERE NOT EXISTS (SELECT 1 FROM core.results WHERE match_id = %s);
+                            """, (tid, int(fh), int(fa), tid))
+                            cur.execute("""
+                                UPDATE core.results
+                                SET final_home_score = %s, final_away_score = %s, settled_at = NOW(), settlement_source = 'jarbet_verified'
+                                WHERE match_id = %s;
+                            """, (int(fh), int(fa), tid))
+                        except Exception:
+                            pass
                 conn.commit()
                 conn.close()
         except Exception as db_ex:
@@ -2985,24 +3229,47 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
 
         # Check all possible ID variants for this tip
         id_variants = extract_tip_match_ids(info, key)
-        score_pair = None
+        score_info = None
 
         if is_ebasket:
             for variant in id_variants:
                 if variant in ebasket_db_results:
-                    score_pair = ebasket_db_results[variant]
+                    score_info = ebasket_db_results[variant]
                     break
         else:
             for variant in id_variants:
                 if variant in fifa_db_results:
-                    score_pair = fifa_db_results[variant]
+                    score_info = fifa_db_results[variant]
                     break
 
         # If this exact match ID has not finished, keep it pending.
-        if score_pair is None:
+        if score_info is None:
             continue
 
-        h_score, a_score = score_pair
+        raw_h, raw_a = score_info[0], score_info[1]
+        feed_h = score_info[2] if len(score_info) > 2 else ""
+        feed_a = score_info[3] if len(score_info) > 3 else ""
+
+        # Player-level alignment: check if the feed swapped home and away sides relative to published tip
+        tip_h = str(info.get("home_player") or "").lower()
+        tip_a = str(info.get("away_player") or "").lower()
+        if not tip_h or not tip_a:
+            fix = str(info.get("fixture") or "")
+            if " x " in fix:
+                hp, ap = fix.split(" x ", 1)
+                tip_h = tip_h or hp.strip().lower()
+                tip_a = tip_a or ap.strip().lower()
+
+        swapped = False
+        if feed_h and feed_a and tip_h and tip_a:
+            if (tip_h in feed_a or tip_a in feed_h) and (tip_h not in feed_h):
+                swapped = True
+
+        if swapped:
+            h_score, a_score = raw_a, raw_h
+            logger.info(f"Re-aligned swapped scores for match {key}: feed was ({raw_h}-{raw_a}), tip aligned to ({h_score}-{a_score})")
+        else:
+            h_score, a_score = raw_h, raw_a
 
         # HARD PLAUSIBILITY SAFETY NET
         if is_ebasket:
@@ -3072,7 +3339,7 @@ def settle_pending_tips(bot_token: str, cache: Dict[str, Any], client=None):
                 }
 
                 # Update PostgreSQL core.published_tips (the source of truth)
-                update_published_tip_settled_in_db(primary_id, t_type, res_status, score_str_val, net_u)
+                update_published_tip_settled_in_db(primary_id, t_type, res_status, score_str_val, net_u, alt_ids=id_variants)
 
                 # Persist to permanent ledgers and audit
                 record_settled_tip(settled_record)
