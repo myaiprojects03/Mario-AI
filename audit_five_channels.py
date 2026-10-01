@@ -425,6 +425,24 @@ def load_audit_data() -> Dict[str, List[Dict[str, Any]]]:
             eff_side = parsed_side or str(side or "home")
             eff_line = parsed_line if parsed_line is not None else float(line or 0.0)
 
+            # Ensure display selection is ALWAYS non-empty (extract from Bet: line in msg_text if pick_str is blank)
+            display_pick = (pick_str or "").strip()
+            if not display_pick and msg_text:
+                for line_m in msg_text.splitlines():
+                    if line_m.strip().startswith("Bet:"):
+                        display_pick = line_m.strip()[4:].strip()
+                        break
+            if not display_pick:
+                if "ou" in ch_key:
+                    dir_str = "Mais de" if eff_side == "over" else "Menos de"
+                    unit_str = "Pontos" if "ebasket" in ch_key else "Gols"
+                    display_pick = f"{dir_str} {eff_line} {unit_str}"
+                elif "ah" in ch_key:
+                    sign = f"+{eff_line}" if eff_line > 0 else f"{eff_line}"
+                    display_pick = f"{eff_side.capitalize()} (Handicap {sign})"
+                else:
+                    display_pick = f"{eff_side.capitalize()} (Resultado Final)"
+
             # Plausibility & Swapped feed alignment
             swapped = False
             true_outcome = None
@@ -472,7 +490,7 @@ def load_audit_data() -> Dict[str, List[Dict[str, Any]]]:
                 "channel_id": ch_id or os.getenv(CHANNEL_ENV_KEYS.get(ch_key, ""), ""),
                 "match_id": m_id,
                 "fixture": fixture,
-                "pick_str": pick_str,
+                "pick_str": display_pick,
                 "market": CHANNEL_NAMES.get(ch_key, ch_key),
                 "channel_key": ch_key,
                 "side": eff_side,

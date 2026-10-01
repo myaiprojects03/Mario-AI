@@ -1,0 +1,32 @@
+[
+  {
+    "tip_id": 85,
+    "match_id": "d_swap_200a6666",
+    "channel_key": "ebasket_money_line",
+    "channel_name": "eBasketball Money Line",
+    "fixture": "BOS Celtics (MARINE) x DEN Nuggets (KARMA)",
+    "selection": "",
+    "original_recorded_result": "LOSS",
+    "official_score": "72-80",
+    "corrected_result": "WIN",
+    "reason": "Recorded as LOSS, but official score 72-80 evaluates to WIN.",
+    "telegram_action": "[DRY-RUN] Would update msg 445566 in @test_ebasket_ml -> \u2705 Won",
+    "database_action": "SKIPPED_DRY_RUN",
+    "timestamp_utc": "2026-10-01T11:46:22.948814+00:00"
+  },
+  {
+    "tip_id": 88,
+    "match_id": "d_swap_3d3c15f5",
+    "channel_key": "ebasket_money_line",
+    "channel_name": "eBasketball Money Line",
+    "fixture": "BOS Celtics (MARINE) x DEN Nuggets (KARMA)",
+    "selection": "",
+    "original_recorded_result": "LOSS",
+    "official_score": "72-80",
+    "corrected_result": "WIN",
+    "reason": "Recorded as LOSS, but official score 72-80 evaluates to WIN.",
+    "telegram_action": "[DRY-RUN] Would update msg 445566 in @test_ebasket_ml -> \u2705 Won",
+    "database_action": "SKIPPED_DRY_RUN",
+    "timestamp_utc": "2026-10-01T11:46:22.948846+00:00"
+  }
+]
