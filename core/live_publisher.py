@@ -1631,13 +1631,19 @@ def get_today_published_tip_count(channel_key: str, dt_brt=None) -> int:
 
     all_dispatched_ids = set()
 
+    def norm_mid(val: Any) -> str:
+        s = str(val or "").strip()
+        if (s.startswith("E") or s.startswith("e")) and len(s) > 1 and s[1:].isdigit():
+            return s[1:]
+        return s
+
     # 1. Authoritative Daily Ledger (Filesystem)
     try:
         daily_ledger = load_daily_tip_ledger()
         if today_str in daily_ledger and isinstance(daily_ledger[today_str], dict):
             for eq_k in equivalent_keys:
                 if eq_k in daily_ledger[today_str] and isinstance(daily_ledger[today_str][eq_k], list):
-                    all_dispatched_ids.update([str(m) for m in daily_ledger[today_str][eq_k]])
+                    all_dispatched_ids.update([norm_mid(m) for m in daily_ledger[today_str][eq_k] if m])
     except Exception:
         pass
 
@@ -1652,7 +1658,7 @@ def get_today_published_tip_count(channel_key: str, dt_brt=None) -> int:
                 """, (today_str, list(equivalent_keys)))
                 for row in cur.fetchall():
                     if row and row[0]:
-                        all_dispatched_ids.add(str(row[0]))
+                        all_dispatched_ids.add(norm_mid(row[0]))
             conn.close()
     except Exception:
         pass
@@ -1663,7 +1669,7 @@ def get_today_published_tip_count(channel_key: str, dt_brt=None) -> int:
         for it in all_settled:
             if it.get("channel_key") in equivalent_keys and str(it.get("date_brt", "")).startswith(today_str):
                 if it.get("match_id"):
-                    all_dispatched_ids.add(str(it["match_id"]))
+                    all_dispatched_ids.add(norm_mid(it["match_id"]))
     except Exception:
         pass
 
@@ -1680,10 +1686,11 @@ def get_today_published_tip_count(channel_key: str, dt_brt=None) -> int:
                     raw_ts = item.get("published_at_utc") or item.get("timestamp")
                     dt_tip_brt = parse_tip_timestamp_brt(raw_ts)
                     if dt_tip_brt and dt_tip_brt.strftime("%Y-%m-%d") == today_str:
-                        all_dispatched_ids.add(m_id)
+                        all_dispatched_ids.add(norm_mid(m_id))
     except Exception:
         pass
 
+    all_dispatched_ids.discard("")
     return len(all_dispatched_ids)
 
 
