@@ -362,8 +362,8 @@ def run_shadow_cycle():
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Mario AI Local Shadow Pipeline")
-    parser.add_argument("--loop", action="store_true", help="Run continuously in a loop")
-    parser.add_argument("--interval", type=int, default=60, help="Sleep interval in seconds between cycles (default: 60s)")
+    parser.add_argument("--loop", "-loop", "-l", action="store_true", help="Run continuously in a loop")
+    parser.add_argument("--interval", "-interval", "-i", type=int, default=60, help="Sleep interval in seconds between cycles (default: 60s)")
     args = parser.parse_args()
 
     init_shadow_db()
