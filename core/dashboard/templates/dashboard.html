@@ -465,12 +465,21 @@
             <button class="filter-pill" onclick="switchChannel('ebasket_ou', this)">eBasketball O/U • LIVE 🟢</button>
         </div>
 
-        <!-- Date Range Filter -->
+        <!-- Date Range Filter (Strict Calendar Month Support) -->
         <div class="filter-group" id="date-filters">
-            <button class="filter-pill active" onclick="setDateFilter('all', this)">All</button>
+            <button class="filter-pill active" id="btn-month-oct" onclick="setDateFilter('2026-10', this)">October 2026 (MTD)</button>
+            <button class="filter-pill" id="btn-month-sep" onclick="setDateFilter('2026-09', this)">September 2026 (Final)</button>
             <button class="filter-pill" onclick="setDateFilter('today', this)">Today</button>
-            <button class="filter-pill" onclick="setDateFilter('7d', this)">7 days</button>
-            <button class="filter-pill" onclick="setDateFilter('14d', this)">14 days</button>
+            <button class="filter-pill" onclick="setDateFilter('all', this)">All Time</button>
+
+            <div class="date-range-group" style="padding: 2px 10px;">
+                <select id="month-dropdown" class="date-input" style="background:#161922; color:#e5e7eb; cursor:pointer;" onchange="onMonthSelect(this.value)">
+                    <option value="" disabled selected>More Months...</option>
+                    <option value="2026-10">October 2026 (MTD)</option>
+                    <option value="2026-09">September 2026 (Final)</option>
+                    <option value="2026-08">August 2026</option>
+                </select>
+            </div>
 
             <div class="date-range-group">
                 <input type="date" id="date-start" class="date-input" onchange="triggerCustomFilter()">
@@ -503,6 +512,64 @@
             <div><strong style="color: #6b7280;">Date Range:</strong> <span id="meta-date-range" style="color: #e5e7eb; font-weight: 600;">-</span></div>
             <div><strong style="color: #6b7280;">Channel:</strong> <span id="meta-channel" style="color: #e5e7eb; font-weight: 600;">-</span></div>
             <div><strong style="color: #6b7280;">Status:</strong> <span id="meta-status" style="color: #10b981; font-weight: 700;">FINAL</span></div>
+        </div>
+
+        <!-- 12-Metric Official Calendar Month Breakdown Strip -->
+        <div style="background: #12141c; border: 1px solid #262b38; border-radius: 12px; padding: 16px; margin-bottom: 20px;">
+            <div style="font-size: 11px; font-weight: 800; color: #9ca3af; letter-spacing: 0.5px; text-transform: uppercase; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+                <span>CALENDAR MONTH SCORECARD: <span id="scorecard-month-label" style="color: #60a5fa;">OCTOBER 2026 MTD</span></span>
+                <span id="scorecard-date-range" style="color: #6b7280; font-weight: 500; font-size: 11px;">2026-10-01 to Present (BRT)</span>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px;">
+                <div style="background: #161922; padding: 10px 14px; border-radius: 8px; border: 1px solid #262b38;">
+                    <div style="font-size: 10px; font-weight: 700; color: #6b7280; text-transform: uppercase;">Total Tips</div>
+                    <div id="metric-total-tips" style="font-size: 20px; font-weight: 800; color: #ffffff; margin-top: 2px;">0</div>
+                </div>
+                <div style="background: #161922; padding: 10px 14px; border-radius: 8px; border: 1px solid #262b38;">
+                    <div style="font-size: 10px; font-weight: 700; color: #10b981; text-transform: uppercase;">Wins</div>
+                    <div id="metric-wins" style="font-size: 20px; font-weight: 800; color: #10b981; margin-top: 2px;">0</div>
+                </div>
+                <div style="background: #161922; padding: 10px 14px; border-radius: 8px; border: 1px solid #262b38;">
+                    <div style="font-size: 10px; font-weight: 700; color: #ef4444; text-transform: uppercase;">Losses</div>
+                    <div id="metric-losses" style="font-size: 20px; font-weight: 800; color: #ef4444; margin-top: 2px;">0</div>
+                </div>
+                <div style="background: #161922; padding: 10px 14px; border-radius: 8px; border: 1px solid #262b38;">
+                    <div style="font-size: 10px; font-weight: 700; color: #9ca3af; text-transform: uppercase;">Voids</div>
+                    <div id="metric-voids" style="font-size: 20px; font-weight: 800; color: #9ca3af; margin-top: 2px;">0</div>
+                </div>
+                <div style="background: #161922; padding: 10px 14px; border-radius: 8px; border: 1px solid #262b38;">
+                    <div style="font-size: 10px; font-weight: 700; color: #9ca3af; text-transform: uppercase;">Pushes</div>
+                    <div id="metric-pushes" style="font-size: 20px; font-weight: 800; color: #9ca3af; margin-top: 2px;">0</div>
+                </div>
+                <div style="background: #161922; padding: 10px 14px; border-radius: 8px; border: 1px solid #262b38;">
+                    <div style="font-size: 10px; font-weight: 700; color: #34d399; text-transform: uppercase;">Half-Wins</div>
+                    <div id="metric-half-wins" style="font-size: 20px; font-weight: 800; color: #34d399; margin-top: 2px;">0</div>
+                </div>
+                <div style="background: #161922; padding: 10px 14px; border-radius: 8px; border: 1px solid #262b38;">
+                    <div style="font-size: 10px; font-weight: 700; color: #f87171; text-transform: uppercase;">Half-Losses</div>
+                    <div id="metric-half-losses" style="font-size: 20px; font-weight: 800; color: #f87171; margin-top: 2px;">0</div>
+                </div>
+                <div style="background: #161922; padding: 10px 14px; border-radius: 8px; border: 1px solid #262b38;">
+                    <div style="font-size: 10px; font-weight: 700; color: #60a5fa; text-transform: uppercase;">Win Rate</div>
+                    <div id="metric-win-rate" style="font-size: 20px; font-weight: 800; color: #60a5fa; margin-top: 2px;">0.0%</div>
+                </div>
+                <div style="background: #161922; padding: 10px 14px; border-radius: 8px; border: 1px solid #262b38;">
+                    <div style="font-size: 10px; font-weight: 700; color: #10b981; text-transform: uppercase;">ROI</div>
+                    <div id="metric-roi" style="font-size: 20px; font-weight: 800; color: #10b981; margin-top: 2px;">0.0%</div>
+                </div>
+                <div style="background: #161922; padding: 10px 14px; border-radius: 8px; border: 1px solid #262b38;">
+                    <div style="font-size: 10px; font-weight: 700; color: #10b981; text-transform: uppercase;">Net Units</div>
+                    <div id="metric-net-units" style="font-size: 20px; font-weight: 800; color: #10b981; margin-top: 2px;">+0.00u</div>
+                </div>
+                <div style="background: #161922; padding: 10px 14px; border-radius: 8px; border: 1px solid #262b38;">
+                    <div style="font-size: 10px; font-weight: 700; color: #fbbf24; text-transform: uppercase;">Pending Tips</div>
+                    <div id="metric-pending-tips" style="font-size: 20px; font-weight: 800; color: #fbbf24; margin-top: 2px;">0</div>
+                </div>
+                <div style="background: #161922; padding: 10px 14px; border-radius: 8px; border: 1px solid #262b38;">
+                    <div style="font-size: 10px; font-weight: 700; color: #fbbf24; text-transform: uppercase;">Pending Exposure</div>
+                    <div id="metric-pending-exposure" style="font-size: 20px; font-weight: 800; color: #fbbf24; margin-top: 2px;">0.00u</div>
+                </div>
+            </div>
         </div>
 
         <div class="main-unit-header">
@@ -599,7 +666,7 @@
                     <tr>
                         <th>MERCADO / CANAL</th>
                         <th>STATUS</th>
-                        <th>PUBLICADAS</th>
+                        <th>TOTAL TIPS</th>
                         <th>SETTLED</th>
                         <th>WINS</th>
                         <th>LOSSES</th>
@@ -607,16 +674,17 @@
                         <th>PUSHES</th>
                         <th>HALF W / L</th>
                         <th>STREAK (ATUAL / MAX)</th>
-                        <th>HIT RATE</th>
+                        <th>WIN RATE</th>
                         <th>NET UNITS</th>
                         <th>ROI</th>
                         <th>ODDS MÉD.</th>
                         <th>PENDENTES</th>
+                        <th>EXPOSIÇÃO</th>
                     </tr>
                 </thead>
                 <tbody id="tbody-market-breakdown">
                     <tr>
-                        <td colspan="15" style="text-align:center;color:#6b7280;padding:16px;">Carregando métricas de
+                        <td colspan="16" style="text-align:center;color:#6b7280;padding:16px;">Carregando métricas de
                             mercados...</td>
                     </tr>
                 </tbody>
@@ -830,7 +898,7 @@
                     btn.classList.remove('active');
                 }
             });
-            debouncedRefresh();
+            refreshDataFast();
         }
 
         function onTipsLimitChange(val) {
@@ -839,21 +907,22 @@
         }
 
         let activeChannel = 'all';
-        let activeDateFilter = 'all';
+        let activeDateFilter = '2026-10'; // Default to Current Calendar Month (October 2026 MTD)
         let chartCumulativeInstance = null;
         let chartDailyInstance = null;
-        let isFetching = false;
         let debounceTimer = null;
+        const clientAnalyticsCache = new Map();
+        const clientMarketCache = new Map();
 
         window.addEventListener('DOMContentLoaded', () => {
             initApp();
 
-            // Non-blocking auto-refresh interval (25s), only runs if page is active
+            // Non-blocking auto-refresh interval (30s), only runs if page is active
             setInterval(() => {
-                if (!document.hidden && !isFetching) {
+                if (!document.hidden) {
                     refreshDataFast();
                 }
-            }, 25000);
+            }, 30000);
         });
 
         function initApp() {
@@ -864,16 +933,8 @@
         }
 
         function refreshDataFast() {
-            if (isFetching) return;
-            isFetching = true;
-
-            Promise.all([
-                fetchAnalytics(),
-                fetchChartsData(),
-                fetchTipsTable()
-            ]).finally(() => {
-                isFetching = false;
-            });
+            fetchAnalytics();
+            fetchTipsTable();
         }
 
         function getQueryString() {
@@ -891,25 +952,58 @@
         function switchChannel(channelId, element) {
             activeChannel = channelId;
             document.querySelectorAll('#channel-tabs .filter-pill').forEach(el => el.classList.remove('active'));
-            element.classList.add('active');
+            if (element) element.classList.add('active');
+
+            // Instant click response from cache if already visited
+            const qs = getQueryString();
+            if (clientAnalyticsCache.has(qs)) {
+                applyAnalyticsData(clientAnalyticsCache.get(qs));
+            }
 
             clearTimeout(debounceTimer);
             debounceTimer = setTimeout(() => {
                 refreshDataFast();
                 fetchPlayerStats();
-            }, 50);
+            }, 30);
         }
 
         function setDateFilter(filterKey, element) {
             activeDateFilter = filterKey;
             document.querySelectorAll('#date-filters .filter-pill').forEach(el => el.classList.remove('active'));
-            element.classList.add('active');
+            if (element) {
+                element.classList.add('active');
+            } else if (filterKey === '2026-10') {
+                const b = document.getElementById('btn-month-oct');
+                if (b) b.classList.add('active');
+            } else if (filterKey === '2026-09') {
+                const b = document.getElementById('btn-month-sep');
+                if (b) b.classList.add('active');
+            }
+
+            const monthSelect = document.getElementById('month-dropdown');
+            if (monthSelect) {
+                monthSelect.value = (filterKey.startsWith('2026-') ? filterKey : "");
+            }
+
+            // Instant click response from cache if already visited
+            const qs = getQueryString();
+            if (clientAnalyticsCache.has(qs)) {
+                applyAnalyticsData(clientAnalyticsCache.get(qs));
+            }
+            if (clientMarketCache.has(filterKey)) {
+                renderMarketBreakdownTable(clientMarketCache.get(filterKey));
+            }
 
             clearTimeout(debounceTimer);
             debounceTimer = setTimeout(() => {
                 refreshDataFast();
                 fetchMarketBreakdown();
-            }, 50);
+            }, 30);
+        }
+
+        function onMonthSelect(monthVal) {
+            if (!monthVal) return;
+            setDateFilter(monthVal, null);
         }
 
         function triggerCustomFilter() {
@@ -920,68 +1014,118 @@
             debounceTimer = setTimeout(() => {
                 refreshDataFast();
                 fetchMarketBreakdown();
-            }, 200);
+            }, 150);
+        }
+
+        function applyAnalyticsData(data) {
+            const a = data.analytics;
+            if (!a) return;
+
+            document.getElementById('selected-channel-title').innerText = a.channel_name;
+            document.getElementById('selected-channel-status').innerText = a.channel_status + ' 🟢';
+
+            // Populate Snapshot Audit Metadata
+            if (document.getElementById('meta-run-id')) {
+                document.getElementById('meta-run-id').innerText = a.report_run_id || 'RUN-LIVE-PROD';
+                document.getElementById('meta-as-of').innerText = a.as_of_brt || '-';
+                document.getElementById('meta-date-range').innerText = a.date_range || 'All';
+                document.getElementById('meta-channel').innerText = a.channel_name || 'All Channels';
+                const metaStatus = document.getElementById('meta-status');
+                const badgeRec = document.getElementById('selected-channel-rec-status');
+                if (metaStatus) {
+                    metaStatus.innerText = a.reconciliation_status || 'FINAL';
+                    metaStatus.style.color = (a.reconciliation_status && a.reconciliation_status.includes('PROVISIONAL')) ? '#60a5fa' : '#10b981';
+                }
+                if (badgeRec) {
+                    badgeRec.innerText = a.status_type || 'FINAL';
+                    badgeRec.style.color = (a.status_type === 'PROVISIONAL') ? '#60a5fa' : '#10b981';
+                    badgeRec.style.borderColor = (a.status_type === 'PROVISIONAL') ? 'rgba(59, 130, 246, 0.3)' : 'rgba(16, 185, 129, 0.3)';
+                    badgeRec.style.background = (a.status_type === 'PROVISIONAL') ? 'rgba(59, 130, 246, 0.15)' : 'rgba(16, 185, 129, 0.15)';
+                }
+            }
+
+            // Populate 12-Metric Official Scorecard
+            if (document.getElementById('metric-total-tips')) {
+                document.getElementById('metric-total-tips').innerText = a.total_tips || '0';
+                document.getElementById('metric-wins').innerText = a.wins !== undefined ? a.wins : '0';
+                document.getElementById('metric-losses').innerText = a.losses !== undefined ? a.losses : '0';
+                document.getElementById('metric-voids').innerText = a.voids !== undefined ? a.voids : '0';
+                document.getElementById('metric-pushes').innerText = a.pushes !== undefined ? a.pushes : '0';
+                document.getElementById('metric-half-wins').innerText = a.half_wins !== undefined ? a.half_wins : '0';
+                document.getElementById('metric-half-losses').innerText = a.half_losses !== undefined ? a.half_losses : '0';
+                document.getElementById('metric-win-rate').innerText = a.win_rate || a.hit_rate || '0.0%';
+
+                const roiEl = document.getElementById('metric-roi');
+                if (roiEl) {
+                    roiEl.innerText = a.roi || '0.0%';
+                    roiEl.style.color = (a.roi && a.roi.startsWith('-')) ? '#ef4444' : '#10b981';
+                }
+
+                const netEl = document.getElementById('metric-net-units');
+                if (netEl) {
+                    netEl.innerText = a.accumulated_units || '+0.00u';
+                    netEl.style.color = (a.accumulated_units && a.accumulated_units.startsWith('-')) ? '#ef4444' : '#10b981';
+                }
+
+                document.getElementById('metric-pending-tips').innerText = a.pending_tips || '0';
+                document.getElementById('metric-pending-exposure').innerText = a.pending_exposure || '0.00u';
+
+                if (document.getElementById('scorecard-month-label')) {
+                    document.getElementById('scorecard-month-label').innerText = (a.selected_month_label || 'SELECTED PERIOD').toUpperCase();
+                }
+                if (document.getElementById('scorecard-date-range')) {
+                    document.getElementById('scorecard-date-range').innerText = a.date_range || 'Official Calendar Range';
+                }
+            }
+
+            const valUnits = document.getElementById('val-accumulated-units');
+            valUnits.innerText = a.accumulated_units;
+            valUnits.style.color = a.accumulated_units.startsWith('-') ? '#ef4444' : '#10b981';
+
+            const valRoi = document.getElementById('val-roi');
+            valRoi.innerText = a.roi;
+            valRoi.className = a.roi.startsWith('-') ? 'sub-metric-val red' : 'sub-metric-val green';
+
+            document.getElementById('val-hit-rate').innerText = a.hit_rate;
+            document.getElementById('val-evaluated-tips').innerText = a.evaluated_tips;
+            document.getElementById('val-pending-subtext').innerText = `${a.pending_tips} pendentes | ${a.published_tips} publicadas`;
+
+            document.getElementById('val-tips-per-day').innerText = a.tips_per_day;
+            document.getElementById('val-monthly-pace').innerText = a.monthly_pace;
+            document.getElementById('val-monthly-estimate').innerText = a.monthly_estimate;
+            document.getElementById('val-max-drawdown').innerText = a.max_drawdown;
+            document.getElementById('val-drawdown-dates').innerText = a.drawdown_dates;
+            document.getElementById('val-streaks').innerText = a.winning_losing_streak;
+            document.getElementById('val-best-day').innerText = a.best_day;
+            const worstEl = document.getElementById('val-worst-day');
+            const worstSub = document.getElementById('subtext-worst-day');
+            worstEl.innerText = a.worst_day;
+            if (a.has_losing_day === false || (a.worst_day && a.worst_day.startsWith('+'))) {
+                worstEl.className = "sub-metric-val green";
+                if (worstSub) worstSub.innerText = "Menor ganho dirio (100% dias positivos)";
+            } else {
+                worstEl.className = "sub-metric-val red";
+                if (worstSub) worstSub.innerText = "Maior perda diria";
+            }
+
+            // Immediately render both charts from payload
+            if (data.labels && data.cumulative_units) {
+                renderCumulativeChart(data.labels, data.cumulative_units);
+                renderDailyChart(data.labels, data.daily_results || []);
+            }
         }
 
         async function fetchAnalytics() {
+            const qs = getQueryString();
+            if (clientAnalyticsCache.has(qs)) {
+                applyAnalyticsData(clientAnalyticsCache.get(qs));
+            }
             try {
-                const res = await fetch(`/api/channel_analytics?${getQueryString()}`);
+                const res = await fetch(`/api/channel_analytics?${qs}`);
                 if (!res.ok) return;
                 const data = await res.json();
-                const a = data.analytics;
-
-                document.getElementById('selected-channel-title').innerText = a.channel_name;
-                document.getElementById('selected-channel-status').innerText = a.channel_status + ' 🟢';
-
-                // Populate Snapshot Audit Metadata
-                if (document.getElementById('meta-run-id')) {
-                    document.getElementById('meta-run-id').innerText = a.report_run_id || 'RUN-LIVE-PROD';
-                    document.getElementById('meta-as-of').innerText = a.as_of_brt || '-';
-                    document.getElementById('meta-date-range').innerText = a.date_range || 'All';
-                    document.getElementById('meta-channel').innerText = a.channel_name || 'All Channels';
-                    const metaStatus = document.getElementById('meta-status');
-                    const badgeRec = document.getElementById('selected-channel-rec-status');
-                    if (metaStatus) {
-                        metaStatus.innerText = a.reconciliation_status || 'FINAL';
-                        metaStatus.style.color = (a.reconciliation_status && a.reconciliation_status.includes('PROVISIONAL')) ? '#60a5fa' : '#10b981';
-                    }
-                    if (badgeRec) {
-                        badgeRec.innerText = a.status_type || 'FINAL';
-                        badgeRec.style.color = (a.status_type === 'PROVISIONAL') ? '#60a5fa' : '#10b981';
-                        badgeRec.style.borderColor = (a.status_type === 'PROVISIONAL') ? 'rgba(59, 130, 246, 0.3)' : 'rgba(16, 185, 129, 0.3)';
-                        badgeRec.style.background = (a.status_type === 'PROVISIONAL') ? 'rgba(59, 130, 246, 0.15)' : 'rgba(16, 185, 129, 0.15)';
-                    }
-                }
-
-                const valUnits = document.getElementById('val-accumulated-units');
-                valUnits.innerText = a.accumulated_units;
-                valUnits.style.color = a.accumulated_units.startsWith('-') ? '#ef4444' : '#10b981';
-
-                const valRoi = document.getElementById('val-roi');
-                valRoi.innerText = a.roi;
-                valRoi.className = a.roi.startsWith('-') ? 'sub-metric-val red' : 'sub-metric-val green';
-
-                document.getElementById('val-hit-rate').innerText = a.hit_rate;
-                document.getElementById('val-evaluated-tips').innerText = a.evaluated_tips;
-                document.getElementById('val-pending-subtext').innerText = `${a.pending_tips} pendentes | ${a.published_tips} publicadas`;
-
-                document.getElementById('val-tips-per-day').innerText = a.tips_per_day;
-                document.getElementById('val-monthly-pace').innerText = a.monthly_pace;
-                document.getElementById('val-monthly-estimate').innerText = a.monthly_estimate;
-                document.getElementById('val-max-drawdown').innerText = a.max_drawdown;
-                document.getElementById('val-drawdown-dates').innerText = a.drawdown_dates;
-                document.getElementById('val-streaks').innerText = a.winning_losing_streak;
-                document.getElementById('val-best-day').innerText = a.best_day;
-                const worstEl = document.getElementById('val-worst-day');
-                const worstSub = document.getElementById('subtext-worst-day');
-                worstEl.innerText = a.worst_day;
-                if (a.has_losing_day === false || (a.worst_day && a.worst_day.startsWith('+'))) {
-                    worstEl.className = "sub-metric-val green";
-                    if (worstSub) worstSub.innerText = "Menor ganho dirio (100% dias positivos)";
-                } else {
-                    worstEl.className = "sub-metric-val red";
-                    if (worstSub) worstSub.innerText = "Maior perda diria";
-                }
+                clientAnalyticsCache.set(qs, data);
+                applyAnalyticsData(data);
             } catch (err) {
                 console.error("Error fetching analytics:", err);
             }
@@ -1119,43 +1263,56 @@
             });
         }
 
+        function renderMarketBreakdownTable(markets) {
+            const tbody = document.getElementById('tbody-market-breakdown');
+            if (!tbody) return;
+
+            if (!markets || markets.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="16" style="text-align:center;color:#6b7280;padding:16px;">Sem dados de mercados</td></tr>';
+                return;
+            }
+
+            const rows = [];
+            markets.forEach(m => {
+                const unitColor = m.net_units.startsWith('-') ? '#ef4444' : '#10b981';
+                const roiColor = m.roi.startsWith('-') ? '#ef4444' : '#10b981';
+                rows.push(`
+                    <tr>
+                        <td><strong>${m.market_name}</strong></td>
+                        <td><span class="badge-live">${m.status}</span></td>
+                        <td><strong>${m.total_tips || m.published_tips}</strong></td>
+                        <td>${m.settled_tips}</td>
+                        <td style="color:#10b981;font-weight:600;">${m.wins}</td>
+                        <td style="color:#ef4444;font-weight:600;">${m.losses}</td>
+                        <td style="color:#9ca3af;">${m.voids}</td>
+                        <td style="color:#9ca3af;">${m.pushes}</td>
+                        <td>${m.half_wins} / ${m.half_losses}</td>
+                        <td><span style="color:#60a5fa;font-weight:600;">${m.current_streak}</span> <span style="color:#6b7280;font-size:0.85em;">(${m.longest_streak})</span></td>
+                        <td><strong>${m.hit_rate}</strong></td>
+                        <td style="color:${unitColor};font-weight:800;">${m.net_units}</td>
+                        <td style="color:${roiColor};font-weight:700;">${m.roi}</td>
+                        <td>${m.avg_odds}</td>
+                        <td style="color:#fbbf24;font-weight:600;">${m.pending_tips}</td>
+                        <td style="color:#fbbf24;font-weight:600;">${m.pending_exposure || '0.00u'}</td>
+                    </tr>
+                `);
+            });
+            tbody.innerHTML = rows.join('');
+        }
+
         async function fetchMarketBreakdown() {
+            const key = activeDateFilter;
+            if (clientMarketCache.has(key)) {
+                renderMarketBreakdownTable(clientMarketCache.get(key));
+            }
             try {
                 const res = await fetch(`/api/market_breakdown?filter_days=${encodeURIComponent(activeDateFilter)}`);
                 if (!res.ok) return;
                 const data = await res.json();
-                const tbody = document.getElementById('tbody-market-breakdown');
-
-                if (!data.markets || data.markets.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:#6b7280;padding:16px;">Sem dados de mercados</td></tr>';
-                    return;
+                if (data.markets) {
+                    clientMarketCache.set(key, data.markets);
+                    renderMarketBreakdownTable(data.markets);
                 }
-
-                const rows = [];
-                data.markets.forEach(m => {
-                    const unitColor = m.net_units.startsWith('-') ? '#ef4444' : '#10b981';
-                    const roiColor = m.roi.startsWith('-') ? '#ef4444' : '#10b981';
-                    rows.push(`
-                        <tr>
-                            <td><strong>${m.market_name}</strong></td>
-                            <td><span class="badge-live">${m.status}</span></td>
-                            <td><strong>${m.published_tips}</strong></td>
-                            <td>${m.settled_tips}</td>
-                            <td style="color:#10b981;font-weight:600;">${m.wins}</td>
-                            <td style="color:#ef4444;font-weight:600;">${m.losses}</td>
-                            <td style="color:#9ca3af;">${m.voids}</td>
-                            <td style="color:#9ca3af;">${m.pushes}</td>
-                            <td>${m.half_wins} / ${m.half_losses}</td>
-                            <td><span style="color:#60a5fa;font-weight:600;">${m.current_streak}</span> <span style="color:#6b7280;font-size:0.85em;">(${m.longest_streak})</span></td>
-                            <td><strong>${m.hit_rate}</strong></td>
-                            <td style="color:${unitColor};font-weight:800;">${m.net_units}</td>
-                            <td style="color:${roiColor};font-weight:700;">${m.roi}</td>
-                            <td>${m.avg_odds}</td>
-                            <td style="color:#fbbf24;font-weight:600;">${m.pending_tips}</td>
-                        </tr>
-                    `);
-                });
-                tbody.innerHTML = rows.join(''); // Single DOM assignment!
             } catch (err) {
                 console.error("Error fetching market breakdown:", err);
             }

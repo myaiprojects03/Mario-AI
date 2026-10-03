@@ -4,6 +4,7 @@ import json
 import time
 import hashlib
 import logging
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 from dotenv import load_dotenv
@@ -79,7 +80,8 @@ PROD_CHANNELS = {
 # In-Memory Cache to eliminate repeated disk I/O and DB query thrashing
 _CACHE_TIMESTAMP = 0.0
 _CACHED_TIPS: List[Dict[str, Any]] = []
-_CACHE_TTL_SECONDS = 5.0  # 5-second TTL prevents request storms while keeping data real-time
+_CACHE_TTL_SECONDS = 180.0  # 3-minute TTL eliminates repeated multi-second WAN DB queries
+_ANALYTICS_MEMO: Dict[str, Tuple[Any, Any, Any, Any, Any]] = {}
 
 
 def get_db_engine():
@@ -349,11 +351,12 @@ def get_cached_reconciled_live_tips(force_refresh: bool = False) -> List[Dict[st
     """
     Returns cached in-memory tips if within TTL, avoiding redundant disk I/O and DB queries.
     """
-    global _CACHE_TIMESTAMP, _CACHED_TIPS
+    global _CACHE_TIMESTAMP, _CACHED_TIPS, _ANALYTICS_MEMO
     now = time.time()
     if force_refresh or (now - _CACHE_TIMESTAMP > _CACHE_TTL_SECONDS) or not _CACHED_TIPS:
         _CACHED_TIPS = load_reconciled_live_tips()
         _CACHE_TIMESTAMP = now
+        _ANALYTICS_MEMO.clear()
     return _CACHED_TIPS
 
 
@@ -364,8 +367,14 @@ def compute_dashboard_analytics_and_charts(
     to_date: Optional[str] = None,
     all_tips: Optional[List[Dict[str, Any]]] = None
 ):
+    memo_key = f"{channel_id}:{filter_days}:{from_date}:{to_date}"
+    if all_tips is None and memo_key in _ANALYTICS_MEMO:
+        return _ANALYTICS_MEMO[memo_key]
+
     if all_tips is None:
         all_tips = get_cached_reconciled_live_tips()
+        if memo_key in _ANALYTICS_MEMO:
+            return _ANALYTICS_MEMO[memo_key]
 
     # 1. Channel Filter
     target_channel = str(channel_id).lower().strip()
@@ -383,13 +392,44 @@ def compute_dashboard_analytics_and_charts(
     # 2. Date Filter (Strict Brazil Time)
     now_brt = datetime.now(BRT_TZ)
     today_str = now_brt.strftime("%Y-%m-%d")
+    current_month_str = now_brt.strftime("%Y-%m")
 
     date_filtered = []
+    f_mode = str(filter_days or "all").lower().strip()
+
+    is_calendar_month = False
+    selected_month = None
+    month_label = ""
+
+    # Calendar Month Matchers (Supports '2026-10', '2026-09', 'october', 'september', 'mtd', or any 'YYYY-MM')
+    if f_mode in ("mtd", "month", "mes", "current_month", "oct", "october", "outubro", "2026-10"):
+        selected_month = "2026-10"
+        is_calendar_month = True
+        month_label = "October 2026 Month-to-Date"
+    elif f_mode in ("sep", "september", "setembro", "2026-09"):
+        selected_month = "2026-09"
+        is_calendar_month = True
+        month_label = "September 2026 Final"
+    elif re.match(r'^\d{4}-\d{2}$', f_mode):
+        selected_month = f_mode
+        is_calendar_month = True
+        try:
+            m_dt = datetime.strptime(selected_month, "%Y-%m")
+            m_name = m_dt.strftime("%B %Y")
+            if selected_month == current_month_str:
+                month_label = f"{m_name} Month-to-Date"
+            else:
+                month_label = f"{m_name} Final"
+        except Exception:
+            month_label = f"Month {selected_month}"
+
     for item in channel_filtered:
         d_str = str(item.get("date_brt") or item.get("timestamp", ""))[:10]
-        f_mode = str(filter_days or "all").lower().strip()
 
-        if f_mode in ("today", "1d", "live", "hoje"):
+        if is_calendar_month and selected_month:
+            if not d_str.startswith(selected_month):
+                continue
+        elif f_mode in ("today", "1d", "live", "hoje"):
             if d_str != today_str:
                 continue
         elif f_mode in ("7d", "7days", "7", "7 dias"):
@@ -399,10 +439,6 @@ def compute_dashboard_analytics_and_charts(
         elif f_mode in ("14d", "14days", "14", "14 dias"):
             cutoff = (now_brt - timedelta(days=14)).strftime("%Y-%m-%d")
             if d_str < cutoff:
-                continue
-        elif f_mode in ("mtd", "month", "mes"):
-            current_month = now_brt.strftime("%Y-%m")
-            if not d_str.startswith(current_month):
                 continue
         elif f_mode == "custom":
             if from_date and d_str < str(from_date).strip():
@@ -564,17 +600,30 @@ def compute_dashboard_analytics_and_charts(
 
     now_brt = datetime.now(BRT_TZ)
     as_of_str = now_brt.strftime("%Y-%m-%d %H:%M:%S BRT")
-    date_range_str = f"{sorted_dates[0]} to {sorted_dates[-1]}" if sorted_dates else "All Historical Data"
+    if is_calendar_month and selected_month:
+        if selected_month == current_month_str:
+            date_range_str = f"{month_label} ({selected_month}-01 to {today_str} BRT)"
+        else:
+            date_range_str = f"{month_label} ({selected_month}-01 to {sorted_dates[-1] if sorted_dates else selected_month+'-30'} BRT)"
+    else:
+        date_range_str = f"{sorted_dates[0]} to {sorted_dates[-1]}" if sorted_dates else "All Historical Data"
+
     ch_tag = PROD_CHANNELS[target_channel]["aliases"][0][:4].upper() if target_channel in PROD_CHANNELS else "ALL"
     run_hash = hashlib.sha256(f"{target_channel}:{date_range_str}:{now_brt.strftime('%Y%m%d%H')}".encode()).hexdigest()[:8].upper()
     report_run_id = f"RUN-{now_brt.strftime('%Y%m%d')}-{ch_tag}-{run_hash}"
     rec_status = "FINAL" if pending_count == 0 else f"PROVISIONAL ({pending_count} pending)"
+
+    full_wins = int(wins - 0.5 * half_wins)
+    full_losses = int(losses - 0.5 * half_losses)
+    pending_exp = float(pending_count * 1.0)
 
     analytics_data = {
         "report_run_id": report_run_id,
         "as_of_brt": as_of_str,
         "date_range": date_range_str,
         "channel": target_channel,
+        "selected_month": selected_month,
+        "selected_month_label": month_label or ("All Historical Data" if f_mode == "all" else f_mode.upper()),
         "reconciliation_status": rec_status,
         "status_type": "FINAL" if pending_count == 0 else "PROVISIONAL",
         "channel_name": PROD_CHANNELS[target_channel]["name"] if target_channel in PROD_CHANNELS else "All Channels (Master View)",
@@ -582,10 +631,14 @@ def compute_dashboard_analytics_and_charts(
         "accumulated_units": f"{sign_units}{total_units:.2f}u",
         "roi": f"{sign_roi}{roi:.1f}%",
         "hit_rate": f"{hit_rate:.1f}%",
+        "win_rate": f"{hit_rate:.1f}%",
+        "total_tips": f"{settled_count + pending_count:,}",
         "evaluated_tips": f"{settled_count:,}",
         "settled_tips": f"{settled_count:,}",
         "published_tips": f"{settled_count + pending_count:,}",
         "pending_tips": f"{pending_count:,}",
+        "pending_exposure": f"{pending_exp:.2f}u",
+        "pending_exposure_val": pending_exp,
         "tips_per_day": f"{tips_per_day}",
         "monthly_pace": f"~{monthly_pace:,} tips",
         "monthly_estimate": f"{sign_units}{total_units*0.8:.1f} to {sign_units}{total_units*1.2:.1f}u",
@@ -598,14 +651,18 @@ def compute_dashboard_analytics_and_charts(
         "worst_day": worst_day_str if sorted_dates else "-0.00u",
         "has_losing_day": has_losing_day,
         "wins": int(wins),
+        "full_wins": full_wins,
         "losses": int(losses),
+        "full_losses": full_losses,
         "voids": voids,
         "pushes": pushes,
         "half_wins": half_wins,
         "half_losses": half_losses
     }
 
-    return analytics_data, chart_labels, chart_cum_units, chart_daily_res, date_filtered
+    result = (analytics_data, chart_labels, chart_cum_units, chart_daily_res, date_filtered)
+    _ANALYTICS_MEMO[memo_key] = result
+    return result
 
 
 # ============================================================================
@@ -706,8 +763,15 @@ async def get_channel_analytics(
     if not is_authenticated(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    analytics_data, _, _, _, _ = compute_dashboard_analytics_and_charts(channel_id, filter_days, from_date, to_date)
-    return {"analytics": analytics_data, "channel_id": channel_id, "filter_days": filter_days}
+    analytics_data, labels, cum_units, daily_res, _ = compute_dashboard_analytics_and_charts(channel_id, filter_days, from_date, to_date)
+    return {
+        "analytics": analytics_data,
+        "labels": labels,
+        "cumulative_units": cum_units,
+        "daily_results": daily_res,
+        "channel_id": channel_id,
+        "filter_days": filter_days
+    }
 
 
 @app.get("/api/charts_data")
@@ -749,6 +813,7 @@ async def get_market_breakdown(request: Request, filter_days: Optional[str] = "a
             "channel_key": ch_key,
             "market_name": meta["name"],
             "status": meta["status"],
+            "total_tips": data.get("total_tips", data["evaluated_tips"]),
             "published_tips": data.get("published_tips", data["evaluated_tips"]),
             "evaluated_tips": data["evaluated_tips"],
             "settled_tips": data.get("settled_tips", data["evaluated_tips"]),
@@ -764,7 +829,8 @@ async def get_market_breakdown(request: Request, filter_days: Optional[str] = "a
             "net_units": data["accumulated_units"],
             "roi": data["roi"],
             "avg_odds": f"{avg_odds:.2f}",
-            "pending_tips": data["pending_tips"]
+            "pending_tips": data["pending_tips"],
+            "pending_exposure": data.get("pending_exposure", "0.00u")
         })
 
     return {"markets": breakdown}
