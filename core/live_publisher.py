@@ -26,6 +26,14 @@ from sqlalchemy import create_engine, text
 from alembic.config import Config
 from alembic import command
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
+    load_dotenv(".env")
+    load_dotenv("/app/.env")
+except ImportError:
+    pass
+
 sys.path.insert(0, ".")
 from core.config.settings import settings
 from core.ingestion.jarbet_client import JarBetClient
@@ -2078,6 +2086,7 @@ class ChannelDispatchRateLimiter:
                 # 2. Daily Limit Check
                 if is_daily_limit_reached(m_key):
                     state["queue"].pop(0)
+                    limit_cap = DAILY_TIP_LIMITS.get(m_key, 150)
                     record_tip_audit_event(
                         match_id=m_id,
                         channel_key=m_key,
@@ -2092,7 +2101,7 @@ class ChannelDispatchRateLimiter:
                         dispatched_at_brt=None,
                         status="REJECTED_DAILY_CAP",
                         reason_code="REJECTED_DAILY_CAP",
-                        reason_details="Channel daily 150-tip cap limit reached",
+                        reason_details=f"Channel daily {limit_cap}-tip cap limit reached",
                         match_link=link_url
                     )
                     continue
