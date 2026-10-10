@@ -62,6 +62,22 @@ services:
       - caddy_data:/data
       - caddy_config:/config
 
+  shadow_evaluator:
+    image: marioaicode-app:latest
+    container_name: mario_ai_shadow_evaluator
+    restart: always
+    depends_on:
+      - db
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgrespassword@db:5432/mario_ai
+      - MODEL_DIR=production_models
+    volumes:
+      - ./core:/app/core
+      - ./run_local_shadow_evaluator.py:/app/run_local_shadow_evaluator.py
+    command: ["python", "run_local_shadow_evaluator.py", "--loop", "--interval", "60"]
+
 volumes:
   postgres_data:
   caddy_data:
