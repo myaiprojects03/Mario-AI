@@ -45,6 +45,12 @@ JARBET_API_KEY = os.getenv("JARBET_API_KEY", "")
 
 # Point to re-evaluated models directory
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+# Also ensure project root is in sys.path
+for candidate in [SCRIPT_DIR, r"D:\Mario AI Code"]:
+    if os.path.exists(candidate) and candidate not in sys.path:
+        sys.path.append(candidate)
 MODELS_DIR = os.getenv("MODEL_DIR") or os.path.join(SCRIPT_DIR, "core", "re-evaluated models")
 if not os.path.exists(MODELS_DIR):
     alt_dir = os.path.join(SCRIPT_DIR, "core", "re-evaluated models")
