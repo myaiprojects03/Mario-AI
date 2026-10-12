@@ -50,7 +50,7 @@ class LightGBMMoneyLineModel:
             self.feature_names = [c for c in candidate_cols if c in df_pd.columns]
 
         if self.feature_names:
-            X = df_pd[self.feature_names].fillna(0.0).values.astype(float)
+            X = df_pd[self.feature_names].values.astype(float)
         else:
             X = np.zeros((len(df_pd), 1))
 
@@ -86,7 +86,7 @@ class LightGBMMoneyLineModel:
         return self
 
     def predict_probs(self, df_test: pl.DataFrame) -> np.ndarray:
-        """Predicts P(Home Win) probabilities (or full 3-class probabilities if requested)."""
+        """Predicts P(Home Win) probabilities."""
         if self.model is None:
             raise RuntimeError("LightGBMMoneyLineModel must be fit before calling predict_probs!")
 
@@ -96,6 +96,15 @@ class LightGBMMoneyLineModel:
         if probs_all.shape[1] > 0:
             probs = probs_all[:, 0]
         else:
-            probs = np.full(len(df_test), 0.40)
+            probs = np.full(len(df_test), np.nan)
 
         return np.clip(probs, 0.01, 0.99)
+
+    def predict_proba_3way(self, df_test: pl.DataFrame) -> np.ndarray:
+        """Predicts full 3-way probabilities [P(Home Win), P(Draw), P(Away Win)]."""
+        if self.model is None:
+            raise RuntimeError("LightGBMMoneyLineModel must be fit before calling predict_proba_3way!")
+
+        X_test, _ = self._prepare_features_and_target(df_test, is_training=False)
+        return self.model.predict_proba(X_test)
+
