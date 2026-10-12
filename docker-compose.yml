@@ -72,7 +72,7 @@ services:
       - .env
     environment:
       - DATABASE_URL=postgresql://postgres:postgrespassword@db:5432/mario_ai
-      - MODEL_DIR=production_models
+      - MODEL_DIR=/app/core/re-evaluated models
     volumes:
       - ./core:/app/core
       - ./run_local_shadow_evaluator.py:/app/run_local_shadow_evaluator.py
