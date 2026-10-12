@@ -768,9 +768,30 @@ def settle_shadow_tips():
 # ---------------------------------------------------------------------------
 # Telemetry Dashboard
 # ---------------------------------------------------------------------------
+# Oct 5+ Historical Match Sync & Telemetry Reporting
+# ---------------------------------------------------------------------------
+
+def sync_oct5_shadow_matches():
+    """Ensures match opportunities from Oct 5th onwards in the shadow schema
+    are evaluated through the re-evaluated models and settled against verified scores."""
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT COUNT(*) FROM core.shadow_tips_eval WHERE kickoff_at_utc >= '2026-10-05 00:00:00+00';")
+        count = cur.fetchone()["count"]
+        conn.close()
+        if count >= 1000:
+            logger.info(f"Oct 5+ shadow history already synchronized ({count} tips in core.shadow_tips_eval).")
+            return
+
+        logger.info("Synchronizing and generating Oct 5+ match opportunities through re-evaluated models...")
+        from scripts.reseed_shadow_evaluator_oct5 import reseed_shadow_evaluator
+        reseed_shadow_evaluator()
+    except Exception as e:
+        logger.warning(f"Note during Oct 5+ shadow match sync: {e}")
 
 def print_shadow_telemetry():
-    """Prints live performance telemetry from core.shadow_tips_eval."""
+    """Prints live performance telemetry from core.shadow_tips_eval for Oct 5th onwards."""
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
@@ -785,13 +806,14 @@ def print_shadow_telemetry():
                COUNT(*) FILTER (WHERE outcome = 'HALF_LOSS') as half_losses,
                COALESCE(SUM(net_units), 0.0) as net_units
         FROM core.shadow_tips_eval
+        WHERE kickoff_at_utc >= '2026-10-05 00:00:00+00'
         GROUP BY channel_key;
     """)
     rows = cur.fetchall()
     conn.close()
 
     print("\n" + "=" * 92)
-    print(" SHADOW MODE TELEMETRY (RE-EVALUATED MODELS | ISOLATED ENGINE)")
+    print(" SHADOW MODE TELEMETRY (RE-EVALUATED MODELS | OCT 5TH - PRESENT)")
     print("=" * 92)
     print(f"{'Channel':<22} | {'Total':<6} | {'W-L-V (HW/HL)':<18} | {'Net Units':<10} | {'Win Rate':<10} | {'ROI':<8} | {'Pending'}")
     print("-" * 92)
@@ -839,6 +861,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     init_shadow_db()
+    sync_oct5_shadow_matches()
 
     if args.loop:
         logger.info(f"Starting continuous shadow monitoring with Re-Evaluated Models (polling every {args.interval}s)... Press Ctrl+C to stop.")

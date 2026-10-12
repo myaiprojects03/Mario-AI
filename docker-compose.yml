@@ -75,6 +75,8 @@ services:
       - MODEL_DIR=/app/core/re-evaluated models
     volumes:
       - ./core:/app/core
+      - ./markets:/app/markets
+      - ./scripts:/app/scripts
       - ./run_local_shadow_evaluator.py:/app/run_local_shadow_evaluator.py
     command: ["python", "run_local_shadow_evaluator.py", "--loop", "--interval", "60"]
 
