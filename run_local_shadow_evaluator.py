@@ -23,7 +23,7 @@ from typing import Dict, Any, List, Optional, Tuple
 
 import requests
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, execute_values
 from dotenv import load_dotenv
 import pandas as pd
 import numpy as np
@@ -786,12 +786,209 @@ def settle_shadow_tips():
 # ---------------------------------------------------------------------------
 # Telemetry Dashboard
 # ---------------------------------------------------------------------------
-# Oct 5+ Historical Match Sync & Telemetry Reporting
-# ---------------------------------------------------------------------------
+def calculate_single_settlement(ch: str, side: str, line: Optional[float], odds: float, fh: int, fa: int) -> Tuple[str, float]:
+    """Calculates settlement outcome and net units given match scores."""
+    outcome = "VOID"
+    net_units = 0.0
 
-def sync_oct5_shadow_matches():
-    """Live shadow pipeline operates exclusively in strict high-edge forward evaluation mode."""
-    pass
+    if "goals_ou" in ch or "ebasket_ou" in ch:
+        tot = fh + fa
+        line_val = line if line is not None else 0.0
+        diff = tot - line_val
+        if diff > 0.25: outcome, net_units = ("WIN", odds - 1.0) if side == "over" else ("LOSS", -1.0)
+        elif diff == 0.25: outcome, net_units = ("HALF_WIN", 0.5 * (odds - 1.0)) if side == "over" else ("HALF_LOSS", -0.5)
+        elif diff == 0.0: outcome, net_units = "VOID", 0.0
+        elif diff == -0.25: outcome, net_units = ("HALF_LOSS", -0.5) if side == "over" else ("HALF_WIN", 0.5 * (odds - 1.0))
+        else: outcome, net_units = ("LOSS", -1.0) if side == "over" else ("WIN", odds - 1.0)
+
+    elif "asian_handicap" in ch:
+        line_val = line if line is not None else 0.0
+        diff = (fh - fa) + line_val if side == "home" else (fa - fh) + line_val
+        if diff > 0.25: outcome, net_units = "WIN", odds - 1.0
+        elif diff == 0.25: outcome, net_units = "HALF_WIN", 0.5 * (odds - 1.0)
+        elif diff == 0.0: outcome, net_units = "VOID", 0.0
+        elif diff == -0.25: outcome, net_units = "HALF_LOSS", -0.5
+        else: outcome, net_units = "LOSS", -1.0
+
+    elif "money_line" in ch:
+        if "ebasket" in ch:
+            if (side == "home" and fh > fa) or (side == "away" and fa > fh):
+                outcome, net_units = "WIN", odds - 1.0
+            else:
+                outcome, net_units = "LOSS", -1.0
+        else: # FIFA DNB
+            if (side == "home" and fh > fa) or (side == "away" and fa > fh):
+                outcome, net_units = "WIN", odds - 1.0
+            elif fh == fa:
+                outcome, net_units = "VOID", 0.0
+            else:
+                outcome, net_units = "LOSS", -1.0
+
+    return outcome, round(net_units, 3)
+
+def clean_and_sync_oct5_shadow_data(clean: bool = True):
+    """
+    Cleans shadow tables (if requested) and reseeds all match opportunities from Oct 5th onwards
+    evaluating them exclusively with the re-evaluated models (*_final.joblib) and high edge filters.
+    All data is strictly saved to core.shadow_tips_eval and core.shadow_results (core.results is UNTOUCHED).
+    """
+    logger.info("=" * 80)
+    logger.info(f"SYNCING SHADOW DATA FROM OCT 5TH (Clean={clean}) WITH RE-EVALUATED MODELS")
+    logger.info("=" * 80)
+
+    conn = psycopg2.connect(DB_URL)
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    if clean:
+        logger.info("Cleaning core.shadow_tips_eval and core.shadow_results...")
+        cur.execute("TRUNCATE TABLE core.shadow_tips_eval, core.shadow_results RESTART IDENTITY;")
+        conn.commit()
+
+    # Load verified scores from core.results and any existing in core.shadow_results (Read Only)
+    cur.execute("""
+        SELECT match_id, final_home_score, final_away_score, sport, settled_at_utc
+        FROM core.results;
+    """)
+    results_map = {}
+    for r in cur.fetchall():
+        results_map[str(r["match_id"])] = r
+
+    cur.execute("""
+        SELECT match_id, final_home_score, final_away_score, sport, settled_at_utc
+        FROM core.shadow_results;
+    """)
+    for r in cur.fetchall():
+        results_map[str(r["match_id"])] = r
+
+    logger.info(f"Loaded {len(results_map)} verified final scores for historical shadow settlement.")
+
+    # Fetch all opportunities since Oct 5th
+    cur.execute("""
+        WITH raw_opps AS (
+            SELECT match_id, match_id as bet365_id, channel_key, sport, fixture, side, line, odds, kickoff_at_utc, published_at_utc as eval_time
+            FROM core.published_tips
+            WHERE published_at_utc >= '2026-10-05 00:00:00+00'
+            UNION
+            SELECT match_id, bet365_id, channel_key, sport, fixture, side, line, odds, kickoff_at_utc, evaluated_at_utc as eval_time
+            FROM core.shadow_tips_eval
+            WHERE kickoff_at_utc >= '2026-10-05 00:00:00+00'
+        )
+        SELECT DISTINCT ON (COALESCE(NULLIF(bet365_id, ''), match_id), channel_key)
+            match_id, bet365_id, channel_key, sport, fixture, side, line, odds, kickoff_at_utc, eval_time
+        FROM raw_opps
+        ORDER BY COALESCE(NULLIF(bet365_id, ''), match_id), channel_key, eval_time ASC;
+    """)
+    opps = cur.fetchall()
+    logger.info(f"Loaded {len(opps)} candidate historical opportunities to evaluate from Oct 5th.")
+
+    # Re-evaluated model thresholds
+    min_edges = {
+        "fifa_goals_ou": 0.08,
+        "fifa_asian_handicap": 0.05,
+        "fifa_money_line": 0.05,
+        "ebasket_money_line": 0.02,
+        "ebasket_ou": 0.02,
+    }
+
+    tips_to_insert = []
+    shadow_results_to_save = {}
+
+    for row in opps:
+        ch_key = row["channel_key"]
+        bundle = mgr.bundles.get(ch_key)
+        if not bundle:
+            continue
+
+        raw_match_id = str(row["match_id"])
+        bet365_id = str(row.get("bet365_id") or raw_match_id)
+        sport = row["sport"]
+        fixture = row["fixture"]
+        side = row["side"]
+        line = float(row["line"]) if row["line"] is not None else None
+        odds = float(row["odds"]) if row["odds"] is not None else 1.0
+        ko_time = row["kickoff_at_utc"]
+        eval_time = row["eval_time"]
+
+        if odds < 1.60:
+            continue
+
+        # Extract features for bundle
+        feat_df = extract_features_for_bundle(row, bundle)
+        model = bundle["model"]
+        calibrator = bundle["calibrator"]
+
+        try:
+            raw_prob = model.predict_proba(feat_df)[0, 1]
+            cal_prob = calibrator.predict([raw_prob])[0]
+        except Exception:
+            cal_prob = 0.50
+
+        imp_prob = 1.0 / odds
+        edge = cal_prob - imp_prob
+        req_edge = min_edges.get(ch_key, 0.03)
+
+        if edge >= req_edge:
+            pick_str = f"{side.upper()} {line}" if line is not None else side.upper()
+            m_res = results_map.get(raw_match_id) or results_map.get(bet365_id)
+            if m_res and m_res["final_home_score"] is not None and m_res["final_away_score"] is not None:
+                fh = int(m_res["final_home_score"])
+                fa = int(m_res["final_away_score"])
+                outcome, net_units = calculate_single_settlement(ch_key, side, line, odds, fh, fa)
+                status = "SETTLED"
+                final_score = f"{fh}-{fa}"
+                settled_at = m_res.get("settled_at_utc") or eval_time
+                if raw_match_id not in shadow_results_to_save:
+                    shadow_results_to_save[raw_match_id] = (
+                        raw_match_id, bet365_id, sport, fh, fa, settled_at, "historic_sync"
+                    )
+            else:
+                status = "PENDING"
+                final_score = None
+                outcome = None
+                net_units = 0.0
+                settled_at = None
+
+            tips_to_insert.append((
+                raw_match_id, bet365_id, sport, ch_key, "Historical", fixture,
+                bundle.get("market_name", "UNKNOWN"), pick_str, side, line, odds,
+                round(imp_prob, 4), round(float(cal_prob), 4), round(float(edge), 4),
+                status, final_score, outcome, net_units, ko_time, eval_time, settled_at
+            ))
+
+    logger.info(f"Re-evaluated models generated {len(tips_to_insert)} qualifying shadow tips.")
+
+    if shadow_results_to_save:
+        res_sql = """
+            INSERT INTO core.shadow_results (
+                match_id, bet365_id, sport, final_home_score, final_away_score, settled_at_utc, source
+            ) VALUES %s
+            ON CONFLICT (match_id) DO NOTHING;
+        """
+        execute_values(cur, res_sql, list(shadow_results_to_save.values()), page_size=1000)
+
+    if tips_to_insert:
+        tips_sql = """
+            INSERT INTO core.shadow_tips_eval (
+                match_id, bet365_id, sport, channel_key, league, fixture, market_type,
+                pick_str, side, line, odds, implied_prob, model_prob, estimated_edge,
+                status, final_score, outcome, net_units, kickoff_at_utc, evaluated_at_utc, settled_at_utc
+            ) VALUES %s
+            ON CONFLICT (channel_key, match_id) DO UPDATE SET
+                status = EXCLUDED.status,
+                final_score = EXCLUDED.final_score,
+                outcome = EXCLUDED.outcome,
+                net_units = EXCLUDED.net_units,
+                settled_at_utc = EXCLUDED.settled_at_utc;
+        """
+        execute_values(cur, tips_sql, tips_to_insert, page_size=1000)
+
+    conn.commit()
+    conn.close()
+
+    # Attempt to fetch scores from JarBet API for any remaining pending shadow matches
+    fetch_scores_for_pending_shadow_matches()
+    settle_shadow_tips()
+    print_shadow_telemetry()
 
 def print_shadow_telemetry():
     """Prints live performance telemetry from core.shadow_tips_eval for Oct 5th onwards."""
@@ -861,9 +1058,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Mario AI Local Shadow Pipeline")
     parser.add_argument("--loop", "-loop", "-l", action="store_true", help="Run continuously in a loop")
     parser.add_argument("--interval", "-interval", "-i", type=int, default=60, help="Sleep interval in seconds between cycles (default: 60s)")
+    parser.add_argument("--clean", "-clean", "-c", action="store_true", help="Clean shadow schema and re-sync from Oct 5th using re-evaluated models")
+    parser.add_argument("--resync-oct5", action="store_true", help="Re-sync historical data from Oct 5th without cleaning")
     args = parser.parse_args()
 
     init_shadow_db()
+
+    env_clean = os.getenv("SHADOW_CLEAN_SYNC", "").strip().lower() in ("true", "1", "yes")
+
+    if args.clean or env_clean:
+        clean_and_sync_oct5_shadow_data(clean=True)
+    elif args.resync_oct5:
+        clean_and_sync_oct5_shadow_data(clean=False)
 
     if args.loop:
         logger.info(f"Starting continuous shadow monitoring with Re-Evaluated Models (polling every {args.interval}s)... Press Ctrl+C to stop.")
@@ -874,4 +1080,5 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             logger.info("Shadow pipeline stopped by user.")
     else:
-        run_shadow_cycle()
+        if not (args.clean or env_clean or args.resync_oct5):
+            run_shadow_cycle()
