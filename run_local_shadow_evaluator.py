@@ -294,6 +294,10 @@ CHANNEL_MIN_EDGE = {
 SHADOW_ENFORCE_CIRCUIT_BREAKER = os.getenv("SHADOW_ENFORCE_CIRCUIT_BREAKER", "false").lower() == "true"
 SHADOW_CIRCUIT_BREAKER_MAX_DRAWDOWN = float(os.getenv("SHADOW_CIRCUIT_BREAKER_MAX_DRAWDOWN", "-20.0"))
 
+def regularize_calibrated_prob(p: float, min_p: float = 0.05, max_p: float = 0.85) -> float:
+    """Clamps isotonic calibrator step-function plateaus away from 0.0 and 1.0 to reflect sports variance."""
+    return float(np.clip(p, min_p, max_p))
+
 def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_odds: float = 1.60):
     """Evaluates upcoming matches using re-evaluated model bundles and logs shadow tips with strict edge locks."""
     mgr = get_shadow_model_manager()
@@ -551,7 +555,7 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_odds: float
                 }
                 X = pd.DataFrame([feat_vec])[feat_names]
                 raw_p = model.predict_proba(X)[0, 1] if hasattr(model, "predict_proba") else model.model.predict_proba(X)[0, 1]
-                cal_p = float(calibrator.predict([raw_p])[0])
+                cal_p = regularize_calibrated_prob(float(calibrator.predict([raw_p])[0]))
 
                 edge_o = cal_p - imp_p_o
                 edge_u = (1.0 - cal_p) - imp_p_u
@@ -1197,7 +1201,7 @@ def clean_and_sync_oct5_shadow_data(clean: bool = True):
             }
             X = pd.DataFrame([feat_vec])[feat_names]
             raw_p = model.predict_proba(X)[0, 1] if hasattr(model, "predict_proba") else model.model.predict_proba(X)[0, 1]
-            cal_p = float(calibrator.predict([raw_p])[0])
+            cal_p = regularize_calibrated_prob(float(calibrator.predict([raw_p])[0]))
             edge_o = cal_p - imp_p_o
             edge_u = (1.0 - cal_p) - (1.0 / u_odds if u_odds > 1.0 else 0.50)
 
