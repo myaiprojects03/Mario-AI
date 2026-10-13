@@ -116,6 +116,9 @@ def init_shadow_db():
         CREATE INDEX IF NOT EXISTS idx_shadow_status ON core.shadow_tips_eval(status);
         CREATE INDEX IF NOT EXISTS idx_shadow_channel ON core.shadow_tips_eval(channel_key);
         CREATE INDEX IF NOT EXISTS idx_shadow_kickoff ON core.shadow_tips_eval(kickoff_at_utc);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_shadow_channel_bet365_uniq 
+            ON core.shadow_tips_eval (channel_key, bet365_id)
+            WHERE bet365_id IS NOT NULL AND bet365_id != '';
 
         CREATE TABLE IF NOT EXISTS core.shadow_results (
             match_id VARCHAR(64) PRIMARY KEY,
@@ -301,8 +304,8 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_odds: float
 
     for match in matches:
         sport = match.get("_sport", "fifa")
-        raw_mid = str(match.get("_id") or match.get("idMatchBet365") or "").strip()
         b365_id = str(match.get("idMatchBet365") or "").strip()
+        raw_mid = b365_id if b365_id else str(match.get("_id") or "").strip()
         league = str(match.get("league") or match.get("tournament") or "")
         odds_dict = match.get("odds", {})
 
@@ -563,6 +566,16 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_odds: float
             imp_prob = 1.0 / odds_out
 
             try:
+                # Deduplicate on (channel_key, bet365_id) and (channel_key, match_id)
+                cur.execute("""
+                    SELECT 1 FROM core.shadow_tips_eval
+                    WHERE channel_key = %s
+                      AND (match_id = %s OR (bet365_id = %s AND bet365_id != ''))
+                    LIMIT 1;
+                """, (ch_key, raw_mid, b365_id))
+                if cur.fetchone():
+                    continue
+
                 cur.execute("""
                     INSERT INTO core.shadow_tips_eval (
                         match_id, bet365_id, sport, channel_key, league, fixture,
@@ -574,7 +587,7 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_odds: float
                         %s, %s, %s, %s, %s, %s,
                         %s, %s, 'PENDING', %s,
                         'AWAITING_MATCH_WHISTLE', 'shadow_api_fetcher', '0.0h'
-                    ) ON CONFLICT (channel_key, match_id) DO NOTHING;
+                    ) ON CONFLICT DO NOTHING;
                 """, (
                     raw_mid, b365_id, sport, ch_key, league, fixture,
                     ch_key, pick_str, side, line_out, odds_out, round(imp_prob, 4),
