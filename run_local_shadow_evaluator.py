@@ -127,6 +127,10 @@ def init_shadow_db():
             source VARCHAR(64) DEFAULT 'shadow_api_fetcher'
         );
         CREATE INDEX IF NOT EXISTS idx_shadow_results_b365 ON core.shadow_results(bet365_id);
+
+        ALTER TABLE core.shadow_tips_eval ADD COLUMN IF NOT EXISTS pending_reason VARCHAR(128) DEFAULT 'NONE (Fully Settled)';
+        ALTER TABLE core.shadow_tips_eval ADD COLUMN IF NOT EXISTS source VARCHAR(64) DEFAULT 'shadow_api_fetcher';
+        ALTER TABLE core.shadow_tips_eval ADD COLUMN IF NOT EXISTS time_pending VARCHAR(64);
     """)
     conn.commit()
     conn.close()
@@ -563,11 +567,13 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_odds: float
                     INSERT INTO core.shadow_tips_eval (
                         match_id, bet365_id, sport, channel_key, league, fixture,
                         market_type, pick_str, side, line, odds, implied_prob,
-                        model_prob, estimated_edge, status, kickoff_at_utc
+                        model_prob, estimated_edge, status, kickoff_at_utc,
+                        pending_reason, source, time_pending
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s, %s,
-                        %s, %s, 'PENDING', %s
+                        %s, %s, 'PENDING', %s,
+                        'AWAITING_MATCH_WHISTLE', 'shadow_api_fetcher', '0.0h'
                     ) ON CONFLICT (channel_key, match_id) DO NOTHING;
                 """, (
                     raw_mid, b365_id, sport, ch_key, league, fixture,
@@ -793,10 +799,42 @@ def settle_shadow_tips():
                 final_score = %s,
                 outcome = %s,
                 net_units = %s,
+                pending_reason = 'NONE (Fully Settled)',
+                source = COALESCE(source, 'shadow_api_fetcher'),
+                time_pending = '0.0h (Resolved)',
                 settled_at_utc = NOW()
             WHERE id = %s;
         """, (final_str, outcome, round(net_units, 3), tip["id"]))
         settled_now += 1
+
+    # -----------------------------------------------------------------------
+    # 4-Hour Rule: Auto-void stale pending fixtures (> 4 hours post-kickoff)
+    # -----------------------------------------------------------------------
+    update_cur.execute("""
+        UPDATE core.shadow_tips_eval
+        SET status = 'SETTLED',
+            final_score = 'ABANDONED',
+            outcome = 'VOID',
+            net_units = 0.000,
+            pending_reason = 'ABANDONED_FIXTURE (Exceeded 4h whistle window)',
+            source = COALESCE(source, 'shadow_api_fetcher'),
+            time_pending = ROUND(EXTRACT(EPOCH FROM (NOW() - kickoff_at_utc))/3600.0, 1)::text || 'h (Exceeded limit)',
+            settled_at_utc = COALESCE(kickoff_at_utc + INTERVAL '4 hours', NOW())
+        WHERE status = 'PENDING'
+          AND kickoff_at_utc < NOW() - INTERVAL '4 hours';
+    """)
+    abandoned_now = update_cur.rowcount
+    if abandoned_now > 0:
+        logger.info(f"4-Hour Rule applied: Auto-voided {abandoned_now} stale fixtures as ABANDONED_FIXTURE.")
+
+    # Update active fresh pending tips (< 4 hours) with real-time pending tracking fields
+    update_cur.execute("""
+        UPDATE core.shadow_tips_eval
+        SET pending_reason = 'AWAITING_MATCH_WHISTLE',
+            source = COALESCE(source, 'shadow_api_fetcher'),
+            time_pending = ROUND(EXTRACT(EPOCH FROM (NOW() - kickoff_at_utc))/3600.0, 1)::text || 'h'
+        WHERE status = 'PENDING';
+    """)
 
     conn.commit()
     conn.close()
@@ -1158,22 +1196,42 @@ def clean_and_sync_oct5_shadow_data(clean: bool = True):
                 status = "SETTLED"
                 final_score = f"{fh}-{fa}"
                 settled_at = m_res.get("settled_at_utc") or eval_time
+                pending_reason = "NONE (Fully Settled)"
+                src = "shadow_api_fetcher"
+                time_pending = "0.0h (Resolved)"
                 if raw_match_id not in shadow_results_to_save:
                     shadow_results_to_save[raw_match_id] = (
                         raw_match_id, bet365_id, sport, fh, fa, settled_at, "historic_sync"
                     )
             else:
-                status = "PENDING"
-                final_score = None
-                outcome = None
-                net_units = 0.0
-                settled_at = None
+                # 4-Hour Rule: Auto-void stale fixtures exceeding 4 hours post-kickoff
+                now_utc = datetime.now(timezone.utc)
+                age_hrs = (now_utc - ko_time).total_seconds() / 3600.0 if ko_time else 0.0
+                if age_hrs >= 4.0:
+                    status = "SETTLED"
+                    final_score = "ABANDONED"
+                    outcome = "VOID"
+                    net_units = 0.000
+                    settled_at = ko_time + timedelta(hours=4) if ko_time else now_utc
+                    pending_reason = "ABANDONED_FIXTURE (Exceeded 4h whistle window)"
+                    src = "shadow_api_fetcher"
+                    time_pending = f"{round(age_hrs, 1)}h (Exceeded limit)"
+                else:
+                    status = "PENDING"
+                    final_score = None
+                    outcome = None
+                    net_units = 0.0
+                    settled_at = None
+                    pending_reason = "AWAITING_MATCH_WHISTLE"
+                    src = "shadow_api_fetcher"
+                    time_pending = f"{round(age_hrs, 1)}h"
 
             tips_to_insert.append((
                 raw_match_id, bet365_id, sport, ch_key, "eSports", fixture,
                 bundle.get("market_name", ch_key), pick_str, side, line, odds,
                 round(imp_prob, 4), round(float(model_p), 4), round(float(edge), 4),
-                status, final_score, outcome, net_units, ko_time, eval_time, settled_at
+                status, final_score, outcome, net_units, ko_time, eval_time, settled_at,
+                pending_reason, src, time_pending
             ))
 
     logger.info(f"Re-evaluated models generated {len(tips_to_insert)} qualifying shadow tips with High-Edge filters.")
@@ -1192,14 +1250,18 @@ def clean_and_sync_oct5_shadow_data(clean: bool = True):
             INSERT INTO core.shadow_tips_eval (
                 match_id, bet365_id, sport, channel_key, league, fixture, market_type,
                 pick_str, side, line, odds, implied_prob, model_prob, estimated_edge,
-                status, final_score, outcome, net_units, kickoff_at_utc, evaluated_at_utc, settled_at_utc
+                status, final_score, outcome, net_units, kickoff_at_utc, evaluated_at_utc, settled_at_utc,
+                pending_reason, source, time_pending
             ) VALUES %s
             ON CONFLICT (channel_key, match_id) DO UPDATE SET
                 status = EXCLUDED.status,
                 final_score = EXCLUDED.final_score,
                 outcome = EXCLUDED.outcome,
                 net_units = EXCLUDED.net_units,
-                settled_at_utc = EXCLUDED.settled_at_utc;
+                settled_at_utc = EXCLUDED.settled_at_utc,
+                pending_reason = EXCLUDED.pending_reason,
+                source = EXCLUDED.source,
+                time_pending = EXCLUDED.time_pending;
         """
         execute_values(cur, tips_sql, tips_to_insert, page_size=1000)
 

@@ -60,6 +60,39 @@ MODEL_VERSION = "v2.0.0-reevaluated"
 FEATURE_SCHEMA_VERSION = "v2.0-calibrated-isotonic"
 
 
+NUM_WORDS = {
+    0: "zero", 1: "one", 2: "two", 3: "three", 4: "four",
+    5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine",
+    10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen",
+    14: "fourteen", 15: "fifteen", 16: "sixteen", 17: "seventeen",
+    18: "eighteen", 19: "nineteen", 20: "twenty"
+}
+
+def num_to_word(n: Any) -> str:
+    n = int(n)
+    if n in NUM_WORDS:
+        return NUM_WORDS[n]
+    tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+    if n < 100:
+        t = n // 10
+        r = n % 10
+        return f"{tens[t]}-{NUM_WORDS[r]}" if r > 0 else tens[t]
+    return str(n)
+
+def format_score_as_words(score_str: str) -> str:
+    if not score_str or score_str == "PENDING":
+        return score_str
+    try:
+        cleaned = score_str.replace(" ", "")
+        if "-" in cleaned:
+            parts = cleaned.split("-")
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                return f"{num_to_word(parts[0])} - {num_to_word(parts[1])}"
+    except Exception:
+        pass
+    return score_str
+
+
 def to_brt_str(dt: Any) -> str:
     """Converts a UTC datetime to Brazil Time (BRT / UTC-3) string."""
     if not dt:
@@ -86,10 +119,11 @@ def generate_reconciliation():
         SELECT id, match_id, bet365_id, sport, channel_key, league, fixture,
                market_type, pick_str, side, line, odds, implied_prob, model_prob,
                estimated_edge, status, final_score, outcome, net_units,
-               kickoff_at_utc, evaluated_at_utc, settled_at_utc
+               kickoff_at_utc, evaluated_at_utc, settled_at_utc,
+               pending_reason, source, time_pending
         FROM core.shadow_tips_eval
         WHERE kickoff_at_utc >= '2026-10-05 00:00:00+00'
-        ORDER BY channel_key, evaluated_at_utc ASC, id ASC;
+        ORDER BY evaluated_at_utc ASC, id ASC;
     """)
     rows = cur.fetchall()
     conn.close()
@@ -112,7 +146,11 @@ def generate_reconciliation():
         model_p = float(r["model_prob"] or implied_p)
         edge = float(r["estimated_edge"] or (model_p - implied_p))
         status = r["status"]
-        final_score = r["final_score"] or "PENDING"
+        raw_final_score = r["final_score"] or "PENDING"
+        if sport == "fifa" and raw_final_score not in ["PENDING", "ABANDONED"]:
+            final_score = format_score_as_words(raw_final_score)
+        else:
+            final_score = raw_final_score
         outcome = r["outcome"] or "PENDING"
         net_units = float(r["net_units"] or 0.0)
 
@@ -154,11 +192,20 @@ def generate_reconciliation():
         tg_msg_id = "SHADOW_SUPPRESSED (Live Telegram Muted)"
         pub_status = "SHADOW_SIMULATED / EVALUATED (No Broadcast)"
 
-        # Pending reason
-        if status == "SETTLED":
-            pending_reason = "NONE (Fully Settled)"
-        else:
-            pending_reason = "AWAITING_MATCH_WHISTLE"
+        # Pending reason and audit tracking fields
+        pending_reason = r.get("pending_reason")
+        if not pending_reason:
+            if status == "SETTLED":
+                if raw_final_score == "ABANDONED":
+                    pending_reason = "ABANDONED_FIXTURE (Exceeded 4h whistle window)"
+                else:
+                    pending_reason = "NONE (Fully Settled)"
+            else:
+                pending_reason = "AWAITING_MATCH_WHISTLE"
+
+        source_val = r.get("source") or "shadow_api_fetcher"
+        time_pending_val = r.get("time_pending") or ("0.0h (Resolved)" if status == "SETTLED" else "Awaiting whistle")
+        resolution_time_val = to_brt_str(settled_utc) if status == "SETTLED" else "PENDING"
 
         rec = {
             "tip_id": tip_id,
@@ -190,6 +237,9 @@ def generate_reconciliation():
             "direct_bet_link": bet_link,
             "link_validation_status": "VALIDATED_PRE_MATCH",
             "pending_reason": pending_reason,
+            "source": source_val,
+            "time_pending": time_pending_val,
+            "resolution_time": resolution_time_val,
             "model_version": MODEL_VERSION,
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "report_run_id": REPORT_RUN_ID,
@@ -228,8 +278,9 @@ def generate_reconciliation():
                 "feature_schema_version": FEATURE_SCHEMA_VERSION,
                 "timezone": "America/Sao_Paulo (BRT / UTC-3)",
                 "total_tips": len(reconciled_records),
-                "settled_tips": sum(1 for r in reconciled_records if r["pending_reason"].startswith("NONE")),
-                "pending_tips": sum(1 for r in reconciled_records if not r["pending_reason"].startswith("NONE")),
+                "settled_tips": sum(1 for r in reconciled_records if r["settlement_result"] != "PENDING"),
+                "abandoned_tips": sum(1 for r in reconciled_records if r["pending_reason"].startswith("ABANDONED")),
+                "pending_tips": sum(1 for r in reconciled_records if r["settlement_result"] == "PENDING"),
                 "consolidated_net_units": round(sum(r["net_units"] for r in reconciled_records), 2),
                 "records": reconciled_records
             }, f, indent=2)
@@ -238,9 +289,11 @@ def generate_reconciliation():
 
     print("\nSummary of Export:")
     print(f"Total Records: {len(reconciled_records)}")
-    settled_count = sum(1 for r in reconciled_records if r["pending_reason"].startswith("NONE"))
-    print(f"Settled Records: {settled_count}")
-    print(f"Pending Records: {len(reconciled_records) - settled_count}")
+    settled_count = sum(1 for r in reconciled_records if r["settlement_result"] != "PENDING")
+    abandoned_count = sum(1 for r in reconciled_records if r["pending_reason"].startswith("ABANDONED"))
+    pending_count = sum(1 for r in reconciled_records if r["settlement_result"] == "PENDING")
+    print(f"Settled Records: {settled_count} (including {abandoned_count} voided under 4-Hour Rule)")
+    print(f"Pending Records: {pending_count} (fresh fixtures awaiting whistle)")
     print(f"Consolidated Units: {sum(r['net_units'] for r in reconciled_records):+.2f}U")
 
 
