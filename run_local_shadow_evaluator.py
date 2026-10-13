@@ -287,6 +287,13 @@ CHANNEL_MIN_EDGE = {
     "ebasket_ou": 0.02,           # Unchanged: eBasket O/U as is (2%)
 }
 
+# Circuit Breaker Policy for Shadow Mode:
+# Production broadcasting (core/live_publisher.py) enforces bankroll alerts and broadcast suppression on drawdowns.
+# Shadow mode operates in continuous observation mode to benchmark the full probability distribution,
+# study recovery dynamics, and avoid censorship bias. An optional hard halt can be enabled via env variable.
+SHADOW_ENFORCE_CIRCUIT_BREAKER = os.getenv("SHADOW_ENFORCE_CIRCUIT_BREAKER", "false").lower() == "true"
+SHADOW_CIRCUIT_BREAKER_MAX_DRAWDOWN = float(os.getenv("SHADOW_CIRCUIT_BREAKER_MAX_DRAWDOWN", "-20.0"))
+
 def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_odds: float = 1.60):
     """Evaluates upcoming matches using re-evaluated model bundles and logs shadow tips with strict edge locks."""
     mgr = get_shadow_model_manager()

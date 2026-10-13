@@ -282,6 +282,7 @@ def generate_reconciliation():
                 "abandoned_tips": sum(1 for r in reconciled_records if r["pending_reason"].startswith("ABANDONED")),
                 "pending_tips": sum(1 for r in reconciled_records if r["settlement_result"] == "PENDING"),
                 "consolidated_net_units": round(sum(r["net_units"] for r in reconciled_records), 2),
+                "circuit_breaker_policy": "SHADOW_OBSERVATION_CONTINUOUS (Circuit breakers and broadcast suppression apply strictly to live production channels. Shadow evaluation operates in unconstrained continuous observation mode to benchmark full distribution performance and evaluate model recovery without censorship bias.)",
                 "records": reconciled_records
             }, f, indent=2)
 
