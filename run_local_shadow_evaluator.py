@@ -251,8 +251,17 @@ def fetch_live_matches() -> List[Dict[str, Any]]:
 # Re-Evaluated Shadow Inference Engine
 # ---------------------------------------------------------------------------
 
-def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_edge: float = 0.02, min_odds: float = 1.60):
-    """Evaluates upcoming matches using re-evaluated model bundles and logs shadow tips."""
+# Strict High-Edge Parameter Locks per Channel
+CHANNEL_MIN_EDGE = {
+    "fifa_goals_ou": 0.08,        # Strict Edge > 8% on FIFA Goals
+    "fifa_asian_handicap": 0.05,  # Strict Edge > 5% on Asian Handicap
+    "fifa_money_line": 0.05,      # Strict Edge > 5% on FIFA Money Line
+    "ebasket_money_line": 0.02,   # Unchanged: eBasket Money Line as is (2%)
+    "ebasket_ou": 0.02,           # Unchanged: eBasket O/U as is (2%)
+}
+
+def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_odds: float = 1.60):
+    """Evaluates upcoming matches using re-evaluated model bundles and logs shadow tips with strict edge locks."""
     mgr = get_shadow_model_manager()
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor()
@@ -300,10 +309,11 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_edge: float
             model = bundle["model"]
             calibrator = bundle.get("calibrator") or bundle.get("calibrators")
             feat_names = bundle["feature_names"]
+            min_edge = CHANNEL_MIN_EDGE.get(ch_key, 0.05)
 
             pick = None
 
-            # 1. FIFA Goals O/U
+            # 1. FIFA Goals O/U (Strict Edge > 8%)
             if ch_key == "fifa_goals_ou":
                 ou = odds_dict.get("over_under", {}) if isinstance(odds_dict.get("over_under"), dict) else {}
                 line_val = float(ou.get("line", 2.5))
@@ -314,6 +324,7 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_edge: float
 
                 exp_tot = (h_sc + a_cc) / 2.0 + (a_sc + h_cc) / 2.0
                 imp_p_over = 1.0 / over_odds if over_odds > 1.0 else 0.50
+                imp_p_under = 1.0 / under_odds if under_odds > 1.0 else 0.50
 
                 feat_vec = {
                     'is_reliable_5': 1.0 if (h_rel and a_rel) else 0.0,
@@ -334,14 +345,14 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_edge: float
                 cal_p = float(calibrator.predict([raw_p])[0])
 
                 edge_o = cal_p - imp_p_over
-                edge_u = (1.0 - cal_p) - (1.05 - imp_p_over)
+                edge_u = (1.0 - cal_p) - imp_p_under
 
                 if edge_o >= min_edge and over_odds >= min_odds:
                     pick = ("over", line_val, over_odds, cal_p, edge_o, f"Mais de {line_val} Gols")
                 elif edge_u >= min_edge and under_odds >= min_odds:
                     pick = ("under", line_val, under_odds, 1.0 - cal_p, edge_u, f"Menos de {line_val} Gols")
 
-            # 2. FIFA Asian Handicap
+            # 2. FIFA Asian Handicap (Strict Edge > 5%)
             elif ch_key == "fifa_asian_handicap":
                 ah = odds_dict.get("asian_handicap", {}) if isinstance(odds_dict.get("asian_handicap"), dict) else {}
                 line_val = float(ah.get("line", 0.0))
@@ -352,6 +363,7 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_edge: float
 
                 diff_exp = (h_sc - h_cc) - (a_sc - a_cc)
                 imp_p_home = 1.0 / h_odds if h_odds > 1.0 else 0.50
+                imp_p_away = 1.0 / a_odds if a_odds > 1.0 else 0.50
 
                 feat_vec = {
                     'is_reliable_5': 1.0 if (h_rel and a_rel) else 0.0,
@@ -375,14 +387,14 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_edge: float
                 cal_p = float(calibrator.predict([raw_p])[0])
 
                 edge_h = cal_p - imp_p_home
-                edge_a = (1.0 - cal_p) - (1.05 - imp_p_home)
+                edge_a = (1.0 - cal_p) - imp_p_away
 
                 if edge_h >= min_edge and h_odds >= min_odds:
                     pick = ("home", line_val, h_odds, cal_p, edge_h, f"{h_team} (Handicap {line_val:+.1f})")
                 elif edge_a >= min_edge and a_odds >= min_odds:
                     pick = ("away", -line_val, a_odds, 1.0 - cal_p, edge_a, f"{a_team} (Handicap {-line_val:+.1f})")
 
-            # 3. FIFA Money Line (Draw No Bet)
+            # 3. FIFA Money Line (Draw No Bet, Strict Edge > 5%)
             elif ch_key == "fifa_money_line":
                 ml = odds_dict.get("money_line", odds_dict.get("draw_no_bet", {})) if isinstance(odds_dict.get("money_line", odds_dict.get("draw_no_bet", {})), dict) else {}
                 h_odds = float(ml.get("home", 0.0))
@@ -429,7 +441,7 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_edge: float
                 elif edge_a >= min_edge and a_odds >= min_odds:
                     pick = ("away", 0.0, a_odds, p_a, edge_a, f"{a_team} (Empate Anula)")
 
-            # 4. eBasket Money Line
+            # 4. eBasket Money Line (Unchanged Edge >= 2%)
             elif ch_key == "ebasket_money_line":
                 ml = odds_dict.get("money_line", {}) if isinstance(odds_dict.get("money_line"), dict) else {}
                 h_odds = float(ml.get("home", 0.0))
@@ -471,7 +483,7 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_edge: float
                 elif edge_a >= min_edge and a_odds >= min_odds:
                     pick = ("away", 0.0, a_odds, 1.0 - cal_p, edge_a, f"{a_team} (Vencedor)")
 
-            # 5. eBasket O/U
+            # 5. eBasket O/U (Unchanged Edge >= 2%)
             elif ch_key == "ebasket_ou":
                 ou = odds_dict.get("over_under", {}) if isinstance(odds_dict.get("over_under"), dict) else {}
                 line_val = float(ou.get("line", 110.5))
@@ -482,6 +494,7 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_edge: float
 
                 exp_tot = (h_sc + a_cc) / 2.0 + (a_sc + h_cc) / 2.0
                 imp_p_o = 1.0 / over_odds if over_odds > 1.0 else 0.50
+                imp_p_u = 1.0 / under_odds if under_odds > 1.0 else 0.50
 
                 feat_vec = {
                     'is_reliable_5': 1.0 if (h_rel and a_rel) else 0.0,
@@ -494,7 +507,7 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_edge: float
                     'expected_total_conceded_10': exp_tot, 'blended_projected_points_10': exp_tot,
                     'ou_line_value': line_val, 'ou_line_diff_10': exp_tot - line_val,
                     'home_total_pts_std_10': 8.0, 'away_total_pts_std_10': 8.0,
-                    'odds_implied_prob_over': imp_p_o, 'odds_implied_prob_under': 1.05 - imp_p_o,
+                    'odds_implied_prob_over': imp_p_o, 'odds_implied_prob_under': imp_p_u,
                     'market_vig': 0.05, 'implied_prob_ratio_over': 1.0,
                     'home_bayesian_rating_mean': 1500.0, 'home_bayesian_rating_std': 40.0,
                     'away_bayesian_rating_mean': 1500.0, 'away_bayesian_rating_std': 40.0,
@@ -507,7 +520,7 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_edge: float
                 cal_p = float(calibrator.predict([raw_p])[0])
 
                 edge_o = cal_p - imp_p_o
-                edge_u = (1.0 - cal_p) - (1.05 - imp_p_o)
+                edge_u = (1.0 - cal_p) - imp_p_u
 
                 if edge_o >= min_edge and over_odds >= min_odds:
                     pick = ("over", line_val, over_odds, cal_p, edge_o, f"Mais de {line_val} Pontos")
