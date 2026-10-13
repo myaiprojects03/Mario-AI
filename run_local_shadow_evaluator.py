@@ -898,21 +898,8 @@ def clean_and_sync_oct5_shadow_data(clean: bool = True):
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
-    # 1. Load verified scores from core.shadow_results and core.results first
+    # 1. Load verified scores from core.results and core.shadow_results
     results_map = {}
-    try:
-        cur.execute("""
-            SELECT match_id, bet365_id, final_home_score, final_away_score, sport, settled_at_utc
-            FROM core.shadow_results
-            WHERE final_home_score IS NOT NULL AND final_away_score IS NOT NULL;
-        """)
-        for r in cur.fetchall():
-            results_map[str(r["match_id"])] = r
-            if r.get("bet365_id"):
-                results_map[str(r["bet365_id"])] = r
-    except Exception as e:
-        logger.debug(f"shadow_results load note: {e}")
-
     try:
         cur.execute("""
             SELECT match_id, final_home_score, final_away_score, settled_at as settled_at_utc
@@ -920,11 +907,26 @@ def clean_and_sync_oct5_shadow_data(clean: bool = True):
             WHERE final_home_score IS NOT NULL AND final_away_score IS NOT NULL;
         """)
         for r in cur.fetchall():
+            results_map[str(r["match_id"])] = r
+    except Exception as e:
+        logger.debug(f"results load note: {e}")
+
+    try:
+        cur.execute("""
+            SELECT match_id, bet365_id, final_home_score, final_away_score, sport, settled_at_utc
+            FROM core.shadow_results
+            WHERE final_home_score IS NOT NULL AND final_away_score IS NOT NULL;
+        """)
+        for r in cur.fetchall():
             mid = str(r["match_id"])
             if mid not in results_map:
                 results_map[mid] = r
+            elif r.get("settled_at_utc") and not results_map[mid].get("settled_at_utc"):
+                results_map[mid]["settled_at_utc"] = r["settled_at_utc"]
+            if r.get("bet365_id") and str(r["bet365_id"]) not in results_map:
+                results_map[str(r["bet365_id"])] = r
     except Exception as e:
-        logger.debug(f"results load note: {e}")
+        logger.debug(f"shadow_results load note: {e}")
 
     logger.info(f"Loaded {len(results_map)} verified final scores for historical shadow settlement.")
 
@@ -1195,7 +1197,10 @@ def clean_and_sync_oct5_shadow_data(clean: bool = True):
                 outcome, net_units = calculate_single_settlement(ch_key, side, line, odds, fh, fa)
                 status = "SETTLED"
                 final_score = f"{fh}-{fa}"
-                settled_at = m_res.get("settled_at_utc") or eval_time
+                settled_at = m_res.get("settled_at_utc")
+                if not settled_at or (ko_time and settled_at <= ko_time):
+                    duration = timedelta(minutes=15) if sport == "fifa" else timedelta(minutes=20)
+                    settled_at = (ko_time + duration) if ko_time else (eval_time + duration)
                 pending_reason = "NONE (Fully Settled)"
                 src = "shadow_api_fetcher"
                 time_pending = "0.0h (Resolved)"
