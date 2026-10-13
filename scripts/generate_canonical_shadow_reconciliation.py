@@ -123,7 +123,7 @@ def generate_reconciliation():
                pending_reason, source, time_pending
         FROM core.shadow_tips_eval
         WHERE kickoff_at_utc >= '2026-10-05 00:00:00+00'
-        ORDER BY evaluated_at_utc ASC, id ASC;
+        ORDER BY id ASC;
     """)
     rows = cur.fetchall()
     conn.close()
