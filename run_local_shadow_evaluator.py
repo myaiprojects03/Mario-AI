@@ -40,23 +40,6 @@ logging.basicConfig(
 logger = logging.getLogger("shadow_pipeline")
 
 def get_db_url() -> str:
-    env_db = os.getenv("DATABASE_URL")
-    if env_db:
-        if "@db:" in env_db:
-            return env_db
-        if "localhost" in env_db or "127.0.0.1" in env_db:
-            try:
-                conn = psycopg2.connect(env_db, connect_timeout=1)
-                cur = conn.cursor()
-                cur.execute("SELECT count(*) FROM core.published_tips;")
-                cnt = cur.fetchone()[0]
-                conn.close()
-                if cnt > 100:
-                    return env_db
-            except Exception:
-                pass
-            return "postgresql://postgres:postgrespassword@24.199.87.126:5432/mario_ai"
-        return env_db
     return "postgresql://postgres:postgrespassword@24.199.87.126:5432/mario_ai"
 
 DB_URL = get_db_url()
@@ -627,12 +610,15 @@ def fetch_scores_for_pending_shadow_matches():
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
-    # Find pending matches where kickoff was at least 12 minutes ago
+    # Find pending matches where kickoff was sufficiently in the past (15m for FIFA, 25m for eBasket)
     cur.execute("""
         SELECT DISTINCT match_id, bet365_id, sport, fixture, kickoff_at_utc
         FROM core.shadow_tips_eval
         WHERE status = 'PENDING'
-          AND kickoff_at_utc < NOW() - INTERVAL '10 minutes'
+          AND (
+              (sport = 'fifa' AND kickoff_at_utc < NOW() - INTERVAL '15 minutes')
+              OR (sport != 'fifa' AND kickoff_at_utc < NOW() - INTERVAL '25 minutes')
+          )
         ORDER BY kickoff_at_utc DESC
         LIMIT 50;
     """)
@@ -658,12 +644,16 @@ def fetch_scores_for_pending_shadow_matches():
                         continue
                     m_status = str(m.get("status") or m.get("state") or "").upper()
                     is_fin = m.get("isFinished") is True or m_status in ["ENDED", "FINISHED", "FT", "CLOSED"]
+                    is_in_play_or_break = m_status in [
+                        "LIVE", "IN_PLAY", "HT", "HALF_TIME", "BREAK", "PAUSED",
+                        "1H", "2H", "1Q", "2Q", "3Q", "4Q", "OT"
+                    ]
                     h_obj = m.get("home", {}) if isinstance(m.get("home"), dict) else {}
                     a_obj = m.get("away", {}) if isinstance(m.get("away"), dict) else {}
                     hg = h_obj.get("goals") if h_obj.get("goals") is not None else h_obj.get("score")
                     ag = a_obj.get("goals") if a_obj.get("goals") is not None else a_obj.get("score")
 
-                    if hg is not None and ag is not None and (is_fin or (m_status not in ["LIVE", "IN_PLAY"])):
+                    if hg is not None and ag is not None and is_fin and not is_in_play_or_break:
                         try:
                             fh = float(hg)
                             fa = float(ag)
@@ -705,8 +695,14 @@ def fetch_scores_for_pending_shadow_matches():
                         continue
                     m_id = str(m.get("_id") or m.get("id") or "").strip()
                     b_id = str(m.get("idMatchBet365") or m.get("bet365_id") or "").strip()
+                    m_status = str(m.get("status") or m.get("state") or "").upper()
+                    is_fin = m.get("isFinished") is True or m_status in ["ENDED", "FINISHED", "FT", "CLOSED", ""]
+                    is_in_play_or_break = m_status in [
+                        "LIVE", "IN_PLAY", "HT", "HALF_TIME", "BREAK", "PAUSED",
+                        "1H", "2H", "1Q", "2Q", "3Q", "4Q", "OT"
+                    ]
 
-                    if m_id in pending_ids or b_id in pending_ids:
+                    if (m_id in pending_ids or b_id in pending_ids) and is_fin and not is_in_play_or_break:
                         h_obj = m.get("home", {}) if isinstance(m.get("home"), dict) else {}
                         a_obj = m.get("away", {}) if isinstance(m.get("away"), dict) else {}
                         hg = h_obj.get("goals") if h_obj.get("goals") is not None else h_obj.get("score")
@@ -754,13 +750,12 @@ def settle_shadow_tips():
 
     cur.execute("""
         SELECT s.id, s.match_id, s.bet365_id, s.sport, s.channel_key, s.side, s.line, s.odds,
-               COALESCE(sr.final_home_score, r.final_home_score) as final_home_score,
-               COALESCE(sr.final_away_score, r.final_away_score) as final_away_score
+               sr.final_home_score,
+               sr.final_away_score
         FROM core.shadow_tips_eval s
         LEFT JOIN core.shadow_results sr ON (s.match_id = sr.match_id OR s.bet365_id = sr.bet365_id OR s.match_id = sr.bet365_id)
-        LEFT JOIN core.results r ON (s.match_id = r.match_id OR s.bet365_id = r.match_id)
         WHERE s.status = 'PENDING'
-          AND (sr.final_home_score IS NOT NULL OR r.final_home_score IS NOT NULL);
+          AND sr.final_home_score IS NOT NULL;
     """)
     pending = cur.fetchall()
 
@@ -922,19 +917,18 @@ def clean_and_sync_oct5_shadow_data(clean: bool = True):
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
-    # 1. Load verified scores from core.results and core.shadow_results
-    results_map = {}
-    try:
-        cur.execute("""
-            SELECT match_id, final_home_score, final_away_score, settled_at as settled_at_utc
-            FROM core.results
-            WHERE final_home_score IS NOT NULL AND final_away_score IS NOT NULL;
-        """)
-        for r in cur.fetchall():
-            results_map[str(r["match_id"])] = r
-    except Exception as e:
-        logger.debug(f"results load note: {e}")
+    # 1. Fetch candidate match opportunities strictly from core.shadow_tips_eval BEFORE cleaning
+    cur.execute("""
+        SELECT DISTINCT ON (COALESCE(NULLIF(bet365_id, ''), match_id), channel_key)
+            match_id, bet365_id, channel_key, sport, fixture, side, line, odds, kickoff_at_utc, evaluated_at_utc as eval_time
+        FROM core.shadow_tips_eval
+        ORDER BY COALESCE(NULLIF(bet365_id, ''), match_id), channel_key, evaluated_at_utc ASC;
+    """)
+    opps = cur.fetchall()
+    logger.info(f"Loaded {len(opps)} candidate match opportunities strictly from core.shadow_tips_eval.")
 
+    # 2. Load verified scores strictly from core.shadow_results
+    results_map = {}
     try:
         cur.execute("""
             SELECT match_id, bet365_id, final_home_score, final_away_score, sport, settled_at_utc
@@ -943,37 +937,19 @@ def clean_and_sync_oct5_shadow_data(clean: bool = True):
         """)
         for r in cur.fetchall():
             mid = str(r["match_id"])
-            if mid not in results_map:
-                results_map[mid] = r
-            elif r.get("settled_at_utc") and not results_map[mid].get("settled_at_utc"):
-                results_map[mid]["settled_at_utc"] = r["settled_at_utc"]
-            if r.get("bet365_id") and str(r["bet365_id"]) not in results_map:
+            results_map[mid] = r
+            if r.get("bet365_id"):
                 results_map[str(r["bet365_id"])] = r
     except Exception as e:
         logger.debug(f"shadow_results load note: {e}")
 
-    logger.info(f"Loaded {len(results_map)} verified final scores for historical shadow settlement.")
+    logger.info(f"Loaded {len(results_map)} verified final scores strictly from core.shadow_results.")
 
-    # 2. Clean shadow_tips_eval if requested
+    # 3. Clean shadow_tips_eval if requested
     if clean:
         logger.info("Cleaning core.shadow_tips_eval...")
         cur.execute("TRUNCATE TABLE core.shadow_tips_eval RESTART IDENTITY;")
         conn.commit()
-
-    # 3. Fetch candidate opportunities since Oct 5th
-    cur.execute("""
-        WITH raw_opps AS (
-            SELECT match_id, match_id as bet365_id, channel_key, sport, fixture, side, line, odds, kickoff_at_utc, published_at_utc as eval_time
-            FROM core.published_tips
-            WHERE published_at_utc >= '2026-10-05 00:00:00+00'
-        )
-        SELECT DISTINCT ON (COALESCE(NULLIF(bet365_id, ''), match_id), channel_key)
-            match_id, bet365_id, channel_key, sport, fixture, side, line, odds, kickoff_at_utc, eval_time
-        FROM raw_opps
-        ORDER BY COALESCE(NULLIF(bet365_id, ''), match_id), channel_key, eval_time ASC;
-    """)
-    opps = cur.fetchall()
-    logger.info(f"Loaded {len(opps)} candidate historical opportunities to evaluate from Oct 5th.")
 
     min_odds = 1.60
     tips_to_insert = []
@@ -1300,6 +1276,11 @@ def clean_and_sync_oct5_shadow_data(clean: bool = True):
     # Attempt to fetch scores from JarBet API for any remaining pending shadow matches
     fetch_scores_for_pending_shadow_matches()
     settle_shadow_tips()
+    try:
+        from scripts.generate_canonical_shadow_reconciliation import generate_reconciliation
+        generate_reconciliation()
+    except Exception as e:
+        logger.debug(f"Canonical export note: {e}")
     print_shadow_telemetry()
 
 def print_shadow_telemetry():
@@ -1393,4 +1374,4 @@ if __name__ == "__main__":
             logger.info("Shadow pipeline stopped by user.")
     else:
         if not (args.clean or env_clean or args.resync_oct5):
-            run_shadow_cycle()
+            clean_and_sync_oct5_shadow_data(clean=True)
