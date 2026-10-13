@@ -531,6 +531,11 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_odds: float
                 continue
 
             side, line_out, odds_out, m_prob, est_edge, pick_str = pick
+            required_min_edge = CHANNEL_MIN_EDGE.get(ch_key, 0.05)
+            if est_edge < required_min_edge:
+                logger.debug(f"Skipping sub-threshold pick: {ch_key} {fixture} (edge {est_edge:.4f} < {required_min_edge:.4f})")
+                continue
+
             imp_prob = 1.0 / odds_out
 
             try:
@@ -785,23 +790,8 @@ def settle_shadow_tips():
 # ---------------------------------------------------------------------------
 
 def sync_oct5_shadow_matches():
-    """Ensures match opportunities from Oct 5th onwards in the shadow schema
-    are evaluated through the re-evaluated models and settled against verified scores."""
-    try:
-        conn = psycopg2.connect(DB_URL)
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT COUNT(*) FROM core.shadow_tips_eval WHERE kickoff_at_utc >= '2026-10-05 00:00:00+00';")
-        count = cur.fetchone()["count"]
-        conn.close()
-        if count >= 1000:
-            logger.info(f"Oct 5+ shadow history already synchronized ({count} tips in core.shadow_tips_eval).")
-            return
-
-        logger.info("Synchronizing and generating Oct 5+ match opportunities through re-evaluated models...")
-        from scripts.reseed_shadow_evaluator_oct5 import reseed_shadow_evaluator
-        reseed_shadow_evaluator()
-    except Exception as e:
-        logger.warning(f"Note during Oct 5+ shadow match sync: {e}")
+    """Live shadow pipeline operates exclusively in strict high-edge forward evaluation mode."""
+    pass
 
 def print_shadow_telemetry():
     """Prints live performance telemetry from core.shadow_tips_eval for Oct 5th onwards."""
@@ -874,7 +864,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     init_shadow_db()
-    sync_oct5_shadow_matches()
 
     if args.loop:
         logger.info(f"Starting continuous shadow monitoring with Re-Evaluated Models (polling every {args.interval}s)... Press Ctrl+C to stop.")

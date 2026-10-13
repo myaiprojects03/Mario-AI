@@ -29,7 +29,7 @@ for cand in [r"D:\Mario AI Code", WORKSPACE_DIR]:
 
 DB_URL = os.getenv("DATABASE_URL") or "postgresql://postgres:postgrespassword@24.199.87.126:5432/mario_ai"
 
-from run_local_shadow_evaluator import MODELS_DIR, get_shadow_model_manager, init_shadow_db
+from run_local_shadow_evaluator import MODELS_DIR, get_shadow_model_manager, init_shadow_db, CHANNEL_MIN_EDGE
 
 def calculate_settlement(ch: str, side: str, line: float, odds: float, fh: float, fa: float):
     """Exact settlement calculation matching production rules."""
@@ -117,16 +117,16 @@ def reseed_shadow_evaluator():
         FROM core.results
         WHERE final_home_score IS NOT NULL AND final_away_score IS NOT NULL;
     """)
-    results_map = {r["match_id"]: (r["final_home_score"], r["final_away_score"]) for r in cur.fetchall()}
+    results_map = {r["match_id"]: (r["final_home_score"], r["final_away_score"], r["settled_at"]) for r in cur.fetchall()}
     print(f"Loaded {len(results_map)} verified match results from core.results.")
 
     shadow_results_dict = {}
     tips_to_insert = []
-    min_edge = 0.02
     min_odds = 1.60
 
     for opp in opps:
         ch_key = opp["channel_key"]
+        min_edge = CHANNEL_MIN_EDGE.get(ch_key, 0.05)
         sport = opp["sport"]
         mid = str(opp["match_id"])
         fixture = opp["fixture"] or ""
@@ -190,7 +190,7 @@ def reseed_shadow_evaluator():
             raw_p = model.predict_proba(X)[0, 1] if hasattr(model, "predict_proba") else model.model.predict_proba(X)[0, 1]
             cal_p = float(calibrator.predict([raw_p])[0])
             edge_o = cal_p - imp_p_over
-            edge_u = (1.0 - cal_p) - (1.05 - imp_p_over)
+            edge_u = (1.0 - cal_p) - (1.0 / u_odds if u_odds > 1.0 else 0.50)
 
             if edge_o >= min_edge and o_odds >= min_odds:
                 pick = ("over", line_val, o_odds, cal_p, edge_o, f"Mais de {line_val} Gols", 1.0 / o_odds)
@@ -227,7 +227,7 @@ def reseed_shadow_evaluator():
             raw_p = model.predict_proba(X)[0, 1] if hasattr(model, "predict_proba") else model.model.predict_proba(X)[0, 1]
             cal_p = float(calibrator.predict([raw_p])[0])
             edge_h = cal_p - imp_p_home
-            edge_a = (1.0 - cal_p) - (1.05 - imp_p_home)
+            edge_a = (1.0 - cal_p) - (1.0 / a_odds if a_odds > 1.0 else 0.50)
 
             if edge_h >= min_edge and h_odds >= min_odds:
                 pick = ("home", line_val, h_odds, cal_p, edge_h, f"{h_team} (Handicap {line_val:+.1f})", 1.0 / h_odds)
@@ -347,7 +347,7 @@ def reseed_shadow_evaluator():
             raw_p = model.predict_proba(X)[0, 1] if hasattr(model, "predict_proba") else model.model.predict_proba(X)[0, 1]
             cal_p = float(calibrator.predict([raw_p])[0])
             edge_o = cal_p - imp_p_o
-            edge_u = (1.0 - cal_p) - (1.05 - imp_p_o)
+            edge_u = (1.0 - cal_p) - (1.0 / u_odds if u_odds > 1.0 else 0.50)
 
             if edge_o >= min_edge and o_odds >= min_odds:
                 pick = ("over", line_val, o_odds, cal_p, edge_o, f"Mais de {line_val} Pontos", imp_p_o)
@@ -364,15 +364,15 @@ def reseed_shadow_evaluator():
             settled_at = None
 
             if mid in results_map:
-                fh, fa = results_map[mid]
+                fh, fa, res_settled = results_map[mid]
                 status = "SETTLED"
                 final_score = f"{int(fh)}-{int(fa)}"
                 outcome, net_units = calculate_settlement(
                     ch=ch_key, side=side, line=line, odds=odds, fh=float(fh), fa=float(fa)
                 )
-                settled_at = eval_time
+                settled_at = res_settled if res_settled else (ko_time + timedelta(minutes=15))
 
-                shadow_results_dict[mid] = (mid, mid, sport, fh, fa, eval_time, "oct5_reseed")
+                shadow_results_dict[mid] = (mid, mid, sport, fh, fa, settled_at, "oct5_reseed")
 
             tips_to_insert.append((
                 mid, mid, sport, ch_key, "eSports", fixture, ch_key,
