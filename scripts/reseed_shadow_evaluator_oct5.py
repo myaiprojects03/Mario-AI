@@ -81,10 +81,10 @@ def reseed_shadow_evaluator():
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
-    # 1. Initialize shadow tables if needed, then clear them
+    # 1. Initialize shadow tables if needed, then clear shadow tips table
     init_shadow_db()
-    print("Clearing core.shadow_tips_eval and core.shadow_results...")
-    cur.execute("TRUNCATE TABLE core.shadow_tips_eval, core.shadow_results RESTART IDENTITY;")
+    print("Clearing core.shadow_tips_eval...")
+    cur.execute("TRUNCATE TABLE core.shadow_tips_eval RESTART IDENTITY;")
     conn.commit()
 
     # 2. Load model manager
@@ -111,14 +111,26 @@ def reseed_shadow_evaluator():
     opps = cur.fetchall()
     print(f"Found {len(opps)} distinct match opportunities to evaluate from scratch.")
 
-    # 4. Pull all verified final scores from core.results
+    # 4. Pull all verified final scores from core.results and core.shadow_results
     cur.execute("""
         SELECT match_id, final_home_score, final_away_score, settled_at
         FROM core.results
         WHERE final_home_score IS NOT NULL AND final_away_score IS NOT NULL;
     """)
-    results_map = {r["match_id"]: (r["final_home_score"], r["final_away_score"], r["settled_at"]) for r in cur.fetchall()}
-    print(f"Loaded {len(results_map)} verified match results from core.results.")
+    results_map = {str(r["match_id"]): (float(r["final_home_score"]), float(r["final_away_score"]), r["settled_at"]) for r in cur.fetchall()}
+    
+    cur.execute("""
+        SELECT match_id, bet365_id, final_home_score, final_away_score, settled_at_utc
+        FROM core.shadow_results
+        WHERE final_home_score IS NOT NULL AND final_away_score IS NOT NULL;
+    """)
+    for r in cur.fetchall():
+        score_t = (float(r["final_home_score"]), float(r["final_away_score"]), r["settled_at_utc"])
+        if r["match_id"] and str(r["match_id"]) not in results_map:
+            results_map[str(r["match_id"])] = score_t
+        if r["bet365_id"] and str(r["bet365_id"]) not in results_map:
+            results_map[str(r["bet365_id"])] = score_t
+    print(f"Loaded {len(results_map)} verified match results from core.results & core.shadow_results.")
 
     shadow_results_dict = {}
     tips_to_insert = []
@@ -184,18 +196,19 @@ def reseed_shadow_evaluator():
                 'ou_line_value': line_val, 'ou_line_diff': exp_tot - line_val,
                 'ou_line_hit_rate_roll': 0.50, 'ht_ft_goal_ratio_league': 0.45,
                 'odds_implied_prob': imp_p_over,
-                'implied_vs_hist_divergence': imp_p_over - 0.50
+                'implied_vs_hist_divergence': imp_p_over - 0.50,
+                'tournament_duration_minutes': 12.0 if "12 min" in fixture.lower() else (10.0 if "10 min" in fixture.lower() else (6.0 if "6 min" in fixture.lower() else 8.0)),
+                'is_whole_line': 1.0 if abs(line_val - round(line_val)) < 1e-4 else 0.0,
+                'gamer_intraday_loss_streak': 0.0,
             }
             X = pd.DataFrame([feat_vec])[feat_names]
             raw_p = model.predict_proba(X)[0, 1] if hasattr(model, "predict_proba") else model.model.predict_proba(X)[0, 1]
             cal_p = float(calibrator.predict([raw_p])[0])
             edge_o = cal_p - imp_p_over
-            edge_u = (1.0 - cal_p) - (1.0 / u_odds if u_odds > 1.0 else 0.50)
 
+            # Enforce Specification Rule: OVER-Only at min_edge (0.03)
             if edge_o >= min_edge and o_odds >= min_odds:
                 pick = ("over", line_val, o_odds, cal_p, edge_o, f"Mais de {line_val} Gols", 1.0 / o_odds)
-            elif edge_u >= min_edge and u_odds >= min_odds:
-                pick = ("under", line_val, u_odds, 1.0 - cal_p, edge_u, f"Menos de {line_val} Gols", 1.0 / u_odds)
 
         # 2. FIFA Asian Handicap
         elif ch_key == "fifa_asian_handicap":
