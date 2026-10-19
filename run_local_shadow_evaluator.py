@@ -1632,7 +1632,7 @@ def print_shadow_telemetry():
     conn.close()
 
     print("\n" + "=" * 92)
-    print(" SHADOW MODE TELEMETRY (RE-EVALUATED MODELS | SEPT 10TH - PRESENT)")
+    print(" SHADOW MODE TELEMETRY (RE-EVALUATED MODELS | OCT 5TH - PRESENT)")
     print("=" * 92)
     print(f"{'Channel':<22} | {'Total':<6} | {'W-L-V (HW/HL)':<18} | {'Net Units':<10} | {'Win Rate':<10} | {'ROI':<8} | {'Pending'}")
     print("-" * 92)
