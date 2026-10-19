@@ -41,7 +41,7 @@ logging.basicConfig(
 logger = logging.getLogger("shadow_pipeline")
 
 def get_db_url() -> str:
-    return "postgresql://postgres:postgrespassword@24.199.87.126:5432/mario_ai"
+    return os.getenv("DATABASE_URL") or "postgresql://postgres:postgrespassword@24.199.87.126:5432/mario_ai"
 
 DB_URL = get_db_url()
 JARBET_BASE_URL = os.getenv("JARBET_BASE_URL", "https://data.jarvisbet.com.br").rstrip("/")
@@ -330,11 +330,57 @@ class ReevaluatedModelManager:
         overs = sum(1 for p in h_pts if p > line_val) + sum(1 for p in a_pts if p > line_val)
         return float(overs / tot_games)
 
+    def get_gamer_intraday_loss_streak(self, sport: str, player: str, ko_dt: Optional[datetime]) -> float:
+        """Calculates consecutive losses by player within the same ongoing session (<= 6 hours before kickoff)."""
+        if not ko_dt:
+            return 0.0
+        p_clean = self.get_clean_player_name(player)
+        hist = self.player_history.get((sport, p_clean), [])
+        if not hist:
+            return 0.0
+        streak = 0
+        for x in reversed(hist):
+            m_dt = x[4]
+            if m_dt is None:
+                continue
+            if ko_dt.tzinfo is not None and m_dt.tzinfo is None:
+                m_dt = m_dt.replace(tzinfo=timezone.utc)
+            elif ko_dt.tzinfo is None and m_dt.tzinfo is not None:
+                m_dt = m_dt.replace(tzinfo=None)
+            if m_dt >= ko_dt:
+                continue
+            gap_seconds = (ko_dt - m_dt).total_seconds()
+            if gap_seconds > 21600.0:  # Gap > 6 hours breaks session
+                break
+            if x[2] == -1:  # Loss
+                streak += 1
+            else:  # Win or draw breaks loss streak
+                break
+        return float(streak)
+
+    @staticmethod
+    def get_tournament_duration(fixture: str, league: str = "") -> float:
+        """Reconstructs scheduled match duration from fixture/league text."""
+        combined = f"{fixture} {league}".lower()
+        if "12 min" in combined:
+            return 12.0
+        elif "10 min" in combined:
+            return 10.0
+        elif "8 min" in combined:
+            return 8.0
+        elif "6 min" in combined:
+            return 6.0
+        elif "4x5" in combined:
+            return 20.0
+        elif "4x4" in combined:
+            return 16.0
+        return 8.0
+
     def get_player_stats(self, sport: str, player: str) -> Tuple[float, float, bool]:
         prof = self.get_player_profile(sport, player)
         return prof['sc_10'], prof['cc_10'], prof['reliable_5']
 
-    def build_feature_vector(self, ch_key: str, sport: str, h_player: str, a_player: str, line_val: float, odds_info: Dict[str, Any], ko_dt: Optional[datetime] = None) -> pd.DataFrame:
+    def build_feature_vector(self, ch_key: str, sport: str, h_player: str, a_player: str, line_val: float, odds_info: Dict[str, Any], ko_dt: Optional[datetime] = None, fixture: str = "", league: str = "") -> pd.DataFrame:
         hp = self.get_player_profile(sport, h_player)
         ap = self.get_player_profile(sport, a_player)
 
@@ -352,6 +398,8 @@ class ReevaluatedModelManager:
             o_odds = float(odds_info.get("over_odds", 1.90))
             imp_p_over = 1.0 / o_odds if o_odds > 1.0 else 0.50
             hit_rate = self.get_line_hit_rate(hp, ap, line_val)
+            dur_mins = float(odds_info.get('duration_minutes') or self.get_tournament_duration(fixture, league))
+            loss_streak = self.get_gamer_intraday_loss_streak(sport, h_player, ko_dt)
             feat_vec = {
                 'is_reliable_5': 1.0 if (hp['reliable_5'] and ap['reliable_5']) else 0.0,
                 'is_reliable_10': 1.0 if (hp['reliable_10'] and ap['reliable_10']) else 0.0,
@@ -365,9 +413,9 @@ class ReevaluatedModelManager:
                 'ou_line_hit_rate_roll': hit_rate, 'ht_ft_goal_ratio_league': 0.45,
                 'odds_implied_prob': imp_p_over,
                 'implied_vs_hist_divergence': imp_p_over - hit_rate,
-                'tournament_duration_minutes': float(odds_info.get('duration_minutes', 8.0)),
+                'tournament_duration_minutes': dur_mins,
                 'is_whole_line': 1.0 if abs(line_val - round(line_val)) < 1e-4 else 0.0,
-                'gamer_intraday_loss_streak': float(hp.get('loss_streak', 0.0)),
+                'gamer_intraday_loss_streak': loss_streak,
             }
 
         elif ch_key == "fifa_asian_handicap":
