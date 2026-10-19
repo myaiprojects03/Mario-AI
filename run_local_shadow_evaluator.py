@@ -46,6 +46,7 @@ def get_db_url() -> str:
 DB_URL = get_db_url()
 JARBET_BASE_URL = os.getenv("JARBET_BASE_URL", "https://data.jarvisbet.com.br").rstrip("/")
 JARBET_API_KEY = os.getenv("JARBET_API_KEY", "")
+SHADOW_START_DATE = os.getenv("SHADOW_START_DATE", "2026-10-05 00:00:00+00")
 
 # Point to re-evaluated models directory
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -62,6 +63,50 @@ if not os.path.exists(MODELS_DIR):
         MODELS_DIR = alt_dir
 
 logger.info(f"Using models directory: {MODELS_DIR}")
+
+# ---------------------------------------------------------------------------
+# Centralized Market Configuration & Constants
+# ---------------------------------------------------------------------------
+
+CHANNEL_MIN_EDGE = {
+    "fifa_goals_ou": 0.03,        # Augmented Model: 3% edge on OVER-only
+    "fifa_asian_handicap": 0.05,  # Strict Edge > 5% on Asian Handicap
+    "fifa_money_line": 0.05,      # Strict Edge > 5% on FIFA Money Line
+    "ebasket_money_line": 0.02,   # Unchanged: eBasket Money Line as is (2%)
+    "ebasket_ou": 0.02,           # Unchanged: eBasket O/U as is (2%)
+}
+
+CHANNEL_TARGET_VIG = {
+    "fifa_goals_ou": 1.06,
+    "fifa_asian_handicap": 1.06,
+    "fifa_money_line": 1.07,
+    "ebasket_money_line": 1.05,
+    "ebasket_ou": 1.05,
+}
+
+MIN_ODDS_THRESHOLD = float(os.getenv("SHADOW_MIN_ODDS", "1.60"))
+CHANNEL_MIN_ODDS = {
+    "fifa_goals_ou": MIN_ODDS_THRESHOLD,
+    "fifa_asian_handicap": MIN_ODDS_THRESHOLD,
+    "fifa_money_line": MIN_ODDS_THRESHOLD,
+    "ebasket_money_line": MIN_ODDS_THRESHOLD,
+    "ebasket_ou": MIN_ODDS_THRESHOLD,
+}
+
+SHADOW_ABANDONED_HOURS = float(os.getenv("SHADOW_ABANDONED_HOURS", "4.0"))
+
+SHADOW_ENFORCE_CIRCUIT_BREAKER = os.getenv("SHADOW_ENFORCE_CIRCUIT_BREAKER", "false").lower() == "true"
+SHADOW_CIRCUIT_BREAKER_MAX_DRAWDOWN = float(os.getenv("SHADOW_CIRCUIT_BREAKER_MAX_DRAWDOWN", "-20.0"))
+
+def regularize_calibrated_prob(p: float, min_p: float = 0.05, max_p: float = 0.85) -> float:
+    """Clamps isotonic calibrator step-function plateaus away from 0.0 and 1.0 to reflect sports variance."""
+    return float(np.clip(p, min_p, max_p))
+
+def get_complementary_odds(odds: float, target_vig: float = 1.06) -> float:
+    """Calculates opposing market odds dynamically from the line's implied vig."""
+    if odds <= 1.0:
+        return round(1.0 / 0.04, 3)
+    return round(1.0 / max(0.04, target_vig - 1.0 / odds), 3)
 
 # ---------------------------------------------------------------------------
 # Database Initialization (Strictly Isolated Tables)
@@ -136,6 +181,7 @@ class ReevaluatedModelManager:
         self.player_history: Dict[Tuple[str, str], List[Tuple[float, float, int, bool, Any]]] = defaultdict(list)
         self.h2h_history: Dict[Tuple[str, str, str], List[Tuple[float, float, int]]] = defaultdict(list)
         self.league_averages: Dict[str, Tuple[float, float]] = {}
+        self.league_stats: Dict[str, Dict[str, float]] = {}
         self.player_stats_cache: Dict[Tuple[str, str], Tuple[float, float, int]] = {}
         self.last_cache_refresh = 0.0
         self.load_bundles()
@@ -171,17 +217,6 @@ class ReevaluatedModelManager:
             conn = psycopg2.connect(DB_URL, connect_timeout=5)
             cur = conn.cursor()
 
-            # Dynamic league-wide scoring averages
-            cur.execute("""
-                SELECT m.sport, AVG(r.final_home_score), AVG(r.final_away_score)
-                FROM core.results r JOIN core.matches m ON r.match_id = m.match_id
-                WHERE r.final_home_score IS NOT NULL AND r.final_away_score IS NOT NULL
-                GROUP BY m.sport;
-            """)
-            for row in cur.fetchall():
-                if row[0]:
-                    self.league_averages[row[0]] = (float(row[1] or 2.6), float(row[2] or 2.6))
-
             cur.execute("""
                 SELECT m.sport, 
                        LOWER(TRIM(m.home_player)) as h_p, 
@@ -202,24 +237,55 @@ class ReevaluatedModelManager:
 
             p_hist = defaultdict(list)
             h2h_hist = defaultdict(list)
+            leg_h = defaultdict(list)
+            leg_a = defaultdict(list)
+            leg_results = defaultdict(lambda: {"wins": 0, "draws": 0, "losses": 0, "scores": []})
 
             for sport, hp, ap, hs, as_, dt in rows:
                 if not hp or not ap or hs is None or as_ is None:
                     continue
-                hs, as_ = float(hs), float(as_)
-                h_res = 1 if hs > as_ else (0 if hs == as_ else -1)
-                a_res = 1 if as_ > hs else (0 if as_ == hs else -1)
+                hs_f, as_f = float(hs), float(as_)
+                h_res = 1 if hs_f > as_f else (0 if hs_f == as_f else -1)
+                a_res = 1 if as_f > hs_f else (0 if as_f == hs_f else -1)
 
-                p_hist[(sport, hp)].append((hs, as_, h_res, True, dt))
-                p_hist[(sport, ap)].append((as_, hs, a_res, False, dt))
-                h2h_hist[(sport, hp, ap)].append((hs, as_, h_res))
+                p_hist[(sport, hp)].append((hs_f, as_f, h_res, True, dt))
+                p_hist[(sport, ap)].append((as_f, hs_f, a_res, False, dt))
+                h2h_hist[(sport, hp, ap)].append((hs_f, as_f, h_res))
+
+                leg_h[sport].append(hs_f)
+                leg_a[sport].append(as_f)
+                leg_results[sport]["scores"].append(hs_f + as_f)
+                if hs_f > as_f:
+                    leg_results[sport]["wins"] += 1
+                elif hs_f == as_f:
+                    leg_results[sport]["draws"] += 1
+                else:
+                    leg_results[sport]["losses"] += 1
+
+            for sport in leg_h:
+                if leg_h[sport]:
+                    self.league_averages[sport] = (float(np.mean(leg_h[sport])), float(np.mean(leg_a[sport])))
+                    tot_g = len(leg_h[sport])
+                    res = leg_results[sport]
+                    self.league_stats[sport] = {
+                        "home_win_rate": res["wins"] / tot_g if tot_g > 0 else 0.50,
+                        "draw_rate": res["draws"] / tot_g if tot_g > 0 else 0.0,
+                        "away_win_rate": res["losses"] / tot_g if tot_g > 0 else 0.50,
+                        "pts_std": float(np.std(res["scores"])) if len(res["scores"]) > 1 else 0.0,
+                        "scores": res["scores"],
+                    }
+
+            if not self.league_averages or not self.league_stats:
+                logger.error("Mandatory database stats check failed: league_averages or league_stats could not be computed from database.")
+                raise RuntimeError("Empirical database stats mandatory: cannot evaluate without dynamic league statistics from core.results.")
 
             self.player_history = p_hist
             self.h2h_history = h2h_hist
             self.last_cache_refresh = now
-            logger.info(f"Dynamically indexed {len(p_hist)} player profiles and {len(h2h_hist)} H2H matchups.")
+            logger.info(f"Dynamically indexed {len(p_hist)} player profiles, {len(h2h_hist)} H2H matchups, {len(self.league_averages)} league averages, and {len(self.league_stats)} league statistics.")
         except Exception as e:
-            logger.warning(f"Player stats refresh note: {e}")
+            logger.error(f"Player stats refresh failed: {e}")
+            raise
 
     @staticmethod
     def get_clean_player_name(player: str) -> str:
@@ -235,20 +301,28 @@ class ReevaluatedModelManager:
         p_clean = self.get_clean_player_name(player)
         hist = self.player_history.get((sport, p_clean), [])
         
-        # Dynamic league scoring fallback
-        leg_avg = self.league_averages.get(sport, (2.6, 2.6) if sport == "fifa" else (53.5, 53.5))
+        if sport not in self.league_averages or sport not in self.league_stats:
+            raise RuntimeError(f"Missing empirical league statistics for sport '{sport}'. Dynamic stats are mandatory.")
+
+        leg_avg = self.league_averages[sport]
         def_sc = float((leg_avg[0] + leg_avg[1]) / 2.0)
         def_cc = float((leg_avg[0] + leg_avg[1]) / 2.0)
+
+        l_stat = self.league_stats[sport]
+        def_hw = l_stat["home_win_rate"]
+        def_dr = l_stat["draw_rate"]
+        def_aw = l_stat["away_win_rate"]
+        def_std = l_stat["pts_std"]
 
         if not hist or len(hist) < 3:
             return {
                 'sc_5': def_sc, 'sc_10': def_sc,
                 'cc_5': def_cc, 'cc_10': def_cc,
-                'win_rate_5': 0.50, 'win_rate_10': 0.50,
-                'draw_rate_5': 0.20, 'draw_rate_10': 0.20,
-                'loss_rate_5': 0.30, 'loss_rate_10': 0.30,
-                'win_rate_home': 0.50, 'win_rate_away': 0.40,
-                'form_streak': 0.0, 'total_pts_std_10': 8.0 if sport == "ebasket" else 1.5,
+                'win_rate_5': def_hw, 'win_rate_10': def_hw,
+                'draw_rate_5': def_dr, 'draw_rate_10': def_dr,
+                'loss_rate_5': def_aw, 'loss_rate_10': def_aw,
+                'win_rate_home': def_hw, 'win_rate_away': def_aw,
+                'form_streak': 0.0, 'total_pts_std_10': def_std,
                 'bayesian_mean': 1500.0, 'bayesian_std': 45.0,
                 'reliable_5': False, 'reliable_10': False,
                 'matches_count': len(hist), 'history': hist
@@ -285,7 +359,7 @@ class ReevaluatedModelManager:
                 break
 
         pts = [x[0] + x[1] for x in last_10]
-        total_pts_std_10 = float(np.std(pts)) if len(pts) > 1 else (8.0 if sport == "ebasket" else 1.5)
+        total_pts_std_10 = float(np.std(pts)) if len(pts) > 1 else def_std
 
         scale = 20.0 if sport == "fifa" else 5.0
         bayesian_mean = 1500.0 + (sc_10 - cc_10) * scale
@@ -313,7 +387,9 @@ class ReevaluatedModelManager:
         all_m = m1 + m2
 
         if not all_m:
-            return 0.0, (0.40 if sport == "fifa" else 0.50), default_exp_tot, 0.0
+            l_stat = self.league_stats.get(sport, {})
+            def_aw = l_stat["away_win_rate"]
+            return 0.0, def_aw, default_exp_tot, 0.0
 
         cnt = float(len(all_m))
         win_rate_away = sum(1 for x in all_m if x[2] == -1) / cnt
@@ -321,12 +397,15 @@ class ReevaluatedModelManager:
         mean_diff = float(np.mean([x[0] - x[1] for x in all_m]))
         return cnt, win_rate_away, mean_combined, mean_diff
 
-    def get_line_hit_rate(self, hp: Dict[str, Any], ap: Dict[str, Any], line_val: float) -> float:
+    def get_line_hit_rate(self, sport: str, hp: Dict[str, Any], ap: Dict[str, Any], line_val: float) -> Optional[float]:
         h_pts = [x[0] + x[1] for x in hp.get('history', [])[-10:]]
         a_pts = [x[0] + x[1] for x in ap.get('history', [])[-10:]]
         tot_games = len(h_pts) + len(a_pts)
         if tot_games == 0:
-            return 0.50
+            scores = self.league_stats.get(sport, {}).get("scores", [])
+            if scores:
+                return float(sum(1 for s in scores if s > line_val) / len(scores))
+            return None
         overs = sum(1 for p in h_pts if p > line_val) + sum(1 for p in a_pts if p > line_val)
         return float(overs / tot_games)
 
@@ -359,28 +438,40 @@ class ReevaluatedModelManager:
         return float(streak)
 
     @staticmethod
-    def get_tournament_duration(fixture: str, league: str = "") -> float:
-        """Reconstructs scheduled match duration from fixture/league text."""
+    def get_tournament_duration(fixture: str, league: str = "", sport: str = "fifa", duration_minutes: Optional[float] = None) -> float:
+        """Reconstructs scheduled match duration dynamically from core.matches or fixture/league text."""
+        if duration_minutes is not None and float(duration_minutes) > 0:
+            return float(duration_minutes)
         combined = f"{fixture} {league}".lower()
-        if "12 min" in combined:
-            return 12.0
-        elif "10 min" in combined:
-            return 10.0
-        elif "8 min" in combined:
-            return 8.0
-        elif "6 min" in combined:
-            return 6.0
-        elif "4x5" in combined:
+        m = re.search(r'\b(6|8|10|12|16|20)\s*(?:mins?|minutes?|m)\b', combined)
+        if m:
+            return float(m.group(1))
+        if "4x5" in combined:
             return 20.0
-        elif "4x4" in combined:
+        if "4x4" in combined:
             return 16.0
-        return 8.0
+        return 20.0 if (sport == "ebasket" or "ebasket" in combined) else 8.0
 
     def get_player_stats(self, sport: str, player: str) -> Tuple[float, float, bool]:
         prof = self.get_player_profile(sport, player)
         return prof['sc_10'], prof['cc_10'], prof['reliable_5']
 
-    def build_feature_vector(self, ch_key: str, sport: str, h_player: str, a_player: str, line_val: float, odds_info: Dict[str, Any], ko_dt: Optional[datetime] = None, fixture: str = "", league: str = "") -> pd.DataFrame:
+    def build_feature_vector(
+        self,
+        ch_key: str,
+        sport: str,
+        h_player: str,
+        a_player: str,
+        line_val: float,
+        odds_info: Dict[str, Any],
+        ko_dt: Optional[datetime] = None,
+        fixture: str = "",
+        league: str = "",
+        duration_minutes: Optional[float] = None
+    ) -> Optional[pd.DataFrame]:
+        if not ko_dt:
+            return None
+
         hp = self.get_player_profile(sport, h_player)
         ap = self.get_player_profile(sport, a_player)
 
@@ -392,13 +483,22 @@ class ReevaluatedModelManager:
         diff_exp = (h_sc - h_cc) - (a_sc - a_cc)
         exp_tot = (h_sc + a_cc) / 2.0 + (a_sc + h_cc) / 2.0
         h2h_cnt, h2h_win_a, h2h_mean_comb, h2h_mean_diff = self.get_h2h_stats(sport, h_player, a_player, exp_tot)
-        hour_val = float(ko_dt.hour) if ko_dt else 12.0
+        hour_val = float(ko_dt.hour)
 
         if ch_key == "fifa_goals_ou":
-            o_odds = float(odds_info.get("over_odds", 1.90))
-            imp_p_over = 1.0 / o_odds if o_odds > 1.0 else 0.50
-            hit_rate = self.get_line_hit_rate(hp, ap, line_val)
-            dur_mins = float(odds_info.get('duration_minutes') or self.get_tournament_duration(fixture, league))
+            target_vig = CHANNEL_TARGET_VIG.get(ch_key, 1.06)
+            o_odds = float(odds_info.get("over_odds") or 0.0)
+            u_odds = float(odds_info.get("under_odds") or 0.0)
+            if o_odds > 1.0:
+                imp_p_over = 1.0 / o_odds
+            elif u_odds > 1.0:
+                imp_p_over = 1.0 / get_complementary_odds(u_odds, target_vig)
+            else:
+                return None
+            hit_rate = self.get_line_hit_rate(sport, hp, ap, line_val)
+            if hit_rate is None:
+                return None
+            dur_mins = float(duration_minutes or odds_info.get('duration_minutes') or self.get_tournament_duration(fixture, league, sport, duration_minutes))
             loss_streak = self.get_gamer_intraday_loss_streak(sport, h_player, ko_dt)
             feat_vec = {
                 'is_reliable_5': 1.0 if (hp['reliable_5'] and ap['reliable_5']) else 0.0,
@@ -419,10 +519,22 @@ class ReevaluatedModelManager:
             }
 
         elif ch_key == "fifa_asian_handicap":
-            h_odds = float(odds_info.get("home_odds", 1.90))
-            a_odds = float(odds_info.get("away_odds", 1.90))
-            imp_p_home = 1.0 / h_odds if h_odds > 1.0 else 0.50
-            imp_p_away = 1.0 / a_odds if a_odds > 1.0 else 0.50
+            target_vig = CHANNEL_TARGET_VIG.get(ch_key, 1.06)
+            h_odds = float(odds_info.get("home_odds") or 0.0)
+            a_odds = float(odds_info.get("away_odds") or 0.0)
+            if h_odds > 1.0:
+                imp_p_home = 1.0 / h_odds
+            elif a_odds > 1.0:
+                imp_p_home = 1.0 / get_complementary_odds(a_odds, target_vig)
+            else:
+                return None
+
+            if a_odds > 1.0:
+                imp_p_away = 1.0 / a_odds
+            elif h_odds > 1.0:
+                imp_p_away = 1.0 / get_complementary_odds(h_odds, target_vig)
+            else:
+                return None
 
             ml_h_odds = float(odds_info.get("ml_home_odds", 0.0))
             ml_a_odds = float(odds_info.get("ml_away_odds", 0.0))
@@ -454,10 +566,23 @@ class ReevaluatedModelManager:
             }
 
         elif ch_key == "fifa_money_line":
-            h_odds = float(odds_info.get("home_odds", 2.10))
-            a_odds = float(odds_info.get("away_odds", 2.10))
-            imp_p_h = 1.0 / h_odds if h_odds > 1.0 else 0.45
-            imp_p_a = 1.0 / a_odds if a_odds > 1.0 else 0.35
+            target_vig = CHANNEL_TARGET_VIG.get(ch_key, 1.07)
+            h_odds = float(odds_info.get("home_odds") or 0.0)
+            a_odds = float(odds_info.get("away_odds") or 0.0)
+            if h_odds > 1.0:
+                imp_p_h = 1.0 / h_odds
+            elif a_odds > 1.0:
+                imp_p_h = 1.0 / get_complementary_odds(a_odds, target_vig)
+            else:
+                return None
+
+            if a_odds > 1.0:
+                imp_p_a = 1.0 / a_odds
+            elif h_odds > 1.0:
+                imp_p_a = 1.0 / get_complementary_odds(h_odds, target_vig)
+            else:
+                return None
+
             feat_vec = {
                 'is_reliable_5': 1.0 if (hp['reliable_5'] and ap['reliable_5']) else 0.0,
                 'is_reliable_10': 1.0 if (hp['reliable_10'] and ap['reliable_10']) else 0.0,
@@ -481,10 +606,23 @@ class ReevaluatedModelManager:
             }
 
         elif ch_key == "ebasket_money_line":
-            h_odds = float(odds_info.get("home_odds", 2.00))
-            a_odds = float(odds_info.get("away_odds", 2.00))
-            imp_p_h = 1.0 / h_odds if h_odds > 1.0 else 0.50
-            imp_p_a = 1.0 / a_odds if a_odds > 1.0 else 0.50
+            target_vig = CHANNEL_TARGET_VIG.get(ch_key, 1.05)
+            h_odds = float(odds_info.get("home_odds") or 0.0)
+            a_odds = float(odds_info.get("away_odds") or 0.0)
+            if h_odds > 1.0:
+                imp_p_h = 1.0 / h_odds
+            elif a_odds > 1.0:
+                imp_p_h = 1.0 / get_complementary_odds(a_odds, target_vig)
+            else:
+                return None
+
+            if a_odds > 1.0:
+                imp_p_a = 1.0 / a_odds
+            elif h_odds > 1.0:
+                imp_p_a = 1.0 / get_complementary_odds(h_odds, target_vig)
+            else:
+                return None
+
             vig = (imp_p_h + imp_p_a) - 1.0 if (imp_p_h + imp_p_a) > 1.0 else abs(imp_p_h + imp_p_a - 1.0)
             ratio = imp_p_h / imp_p_a if imp_p_a > 0 else 1.0
             feat_vec = {
@@ -507,10 +645,23 @@ class ReevaluatedModelManager:
             }
 
         elif ch_key == "ebasket_ou":
-            o_odds = float(odds_info.get("over_odds", 1.90))
-            u_odds = float(odds_info.get("under_odds", 1.90))
-            imp_p_o = 1.0 / o_odds if o_odds > 1.0 else 0.50
-            imp_p_u = 1.0 / u_odds if u_odds > 1.0 else 0.50
+            target_vig = CHANNEL_TARGET_VIG.get(ch_key, 1.05)
+            o_odds = float(odds_info.get("over_odds") or 0.0)
+            u_odds = float(odds_info.get("under_odds") or 0.0)
+            if o_odds > 1.0:
+                imp_p_o = 1.0 / o_odds
+            elif u_odds > 1.0:
+                imp_p_o = 1.0 / get_complementary_odds(u_odds, target_vig)
+            else:
+                return None
+
+            if u_odds > 1.0:
+                imp_p_u = 1.0 / u_odds
+            elif o_odds > 1.0:
+                imp_p_u = 1.0 / get_complementary_odds(o_odds, target_vig)
+            else:
+                return None
+
             exp_pts_5 = (h_sc_5 + a_cc_5) / 2.0 + (a_sc_5 + h_cc_5) / 2.0
             exp_conc_10 = h_cc + a_cc
             blended = (exp_tot + exp_conc_10) / 2.0
@@ -586,35 +737,7 @@ def fetch_live_matches() -> List[Dict[str, Any]]:
 # Re-Evaluated Shadow Inference Engine
 # ---------------------------------------------------------------------------
 
-# Strict High-Edge Parameter Locks per Channel
-CHANNEL_MIN_EDGE = {
-    "fifa_goals_ou": 0.03,        # Augmented Model: 3% edge on OVER-only
-    "fifa_asian_handicap": 0.05,  # Strict Edge > 5% on Asian Handicap
-    "fifa_money_line": 0.05,      # Strict Edge > 5% on FIFA Money Line
-    "ebasket_money_line": 0.02,   # Unchanged: eBasket Money Line as is (2%)
-    "ebasket_ou": 0.02,           # Unchanged: eBasket O/U as is (2%)
-}
-
-# Circuit Breaker Policy for Shadow Mode:
-# Production broadcasting (core/live_publisher.py) enforces bankroll alerts and broadcast suppression on drawdowns.
-# Shadow mode operates in continuous observation mode to benchmark the full probability distribution,
-# study recovery dynamics, and avoid censorship bias. An optional hard halt can be enabled via env variable.
-SHADOW_ENFORCE_CIRCUIT_BREAKER = os.getenv("SHADOW_ENFORCE_CIRCUIT_BREAKER", "false").lower() == "true"
-SHADOW_CIRCUIT_BREAKER_MAX_DRAWDOWN = float(os.getenv("SHADOW_CIRCUIT_BREAKER_MAX_DRAWDOWN", "-20.0"))
-
-def regularize_calibrated_prob(p: float, min_p: float = 0.05, max_p: float = 0.85) -> float:
-    """Clamps isotonic calibrator step-function plateaus away from 0.0 and 1.0 to reflect sports variance."""
-    return float(np.clip(p, min_p, max_p))
-
-def get_complementary_odds(odds: float, target_vig: float = 1.06) -> float:
-    """Calculates opposing market odds dynamically from the line's implied vig."""
-    if odds <= 1.01:
-        return 2.00
-    imp = 1.0 / odds
-    comp_imp = max(0.04, target_vig - imp)
-    return round(1.0 / comp_imp, 3)
-
-def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_odds: float = 1.60):
+def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_odds: Optional[float] = None):
     """Evaluates upcoming matches using re-evaluated model bundles and logs shadow tips with strict edge locks."""
     mgr = get_shadow_model_manager()
     conn = psycopg2.connect(DB_URL)
@@ -638,10 +761,12 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_odds: float
 
         home_info = match.get("home", {}) if isinstance(match.get("home"), dict) else {}
         away_info = match.get("away", {}) if isinstance(match.get("away"), dict) else {}
-        h_team = home_info.get("teamName", "")
-        a_team = away_info.get("teamName", "")
-        h_player = home_info.get("name", "")
-        a_player = away_info.get("name", "")
+        h_team = str(home_info.get("teamName") or "").strip()
+        a_team = str(away_info.get("teamName") or "").strip()
+        h_player = str(home_info.get("name") or "").strip()
+        a_player = str(away_info.get("name") or "").strip()
+        if not h_player or not a_player or not h_team or not a_team:
+            continue
         fixture = f"{h_team} ({h_player}) vs {a_team} ({a_player})"
 
         ko_str = match.get("startedAt")
@@ -651,6 +776,8 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_odds: float
                 ko_dt = datetime.fromisoformat(ko_str.replace("Z", "+00:00"))
             except Exception:
                 pass
+        if not ko_dt:
+            continue
 
         h_sc, h_cc, h_rel = mgr.get_player_stats(sport, h_player)
         a_sc, a_cc, a_rel = mgr.get_player_stats(sport, a_player)
@@ -664,57 +791,79 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_odds: float
             calibrator = bundle.get("calibrator") or bundle.get("calibrators")
             feat_names = bundle["feature_names"]
             min_edge = CHANNEL_MIN_EDGE.get(ch_key, 0.05)
+            min_odds_val = min_odds if min_odds is not None else CHANNEL_MIN_ODDS.get(ch_key, MIN_ODDS_THRESHOLD)
+            target_vig = CHANNEL_TARGET_VIG.get(ch_key, 1.06)
 
             pick = None
 
-            # 1. FIFA Goals O/U (Strict Edge > 8%)
+            # 1. FIFA Goals O/U (Strict Edge >= 3%, OVER-Only)
             if ch_key == "fifa_goals_ou":
                 ou = odds_dict.get("over_under", {}) if isinstance(odds_dict.get("over_under"), dict) else {}
-                line_val = float(ou.get("line", 2.5))
+                raw_line = ou.get("line")
+                if raw_line is None or float(raw_line) <= 0.0:
+                    continue
+                line_val = float(raw_line)
                 over_odds = float(ou.get("over", 0.0))
                 under_odds = float(ou.get("under", 0.0))
                 if over_odds <= 1.05 and under_odds <= 1.05:
                     continue
 
-                odds_info = {"over_odds": over_odds, "under_odds": under_odds}
-                X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, line_val, odds_info, ko_dt)
+                if over_odds > 1.05 and under_odds <= 1.05:
+                    under_odds = get_complementary_odds(over_odds, target_vig)
+                elif under_odds > 1.05 and over_odds <= 1.05:
+                    over_odds = get_complementary_odds(under_odds, target_vig)
+
+                dur_mins = float(match.get("duration_minutes") or odds_dict.get('duration_minutes') or mgr.get_tournament_duration(fixture, league, sport, match.get("duration_minutes")))
+                odds_info = {"over_odds": over_odds, "under_odds": under_odds, "duration_minutes": dur_mins}
+                X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, line_val, odds_info, ko_dt, fixture=fixture, league=league, duration_minutes=dur_mins)
+                if X is None:
+                    continue
                 raw_p = model.predict_proba(X)[0, 1] if hasattr(model, "predict_proba") else model.model.predict_proba(X)[0, 1]
                 cal_p = float(calibrator.predict([raw_p])[0])
-                imp_p_over = 1.0 / over_odds if over_odds > 1.0 else 0.50
-                imp_p_under = 1.0 / under_odds if under_odds > 1.0 else 0.50
+                imp_p_over = 1.0 / over_odds
 
                 edge_o = cal_p - imp_p_over
 
                 # Enforce Specification Rule: OVER-Only
-                if edge_o >= min_edge and over_odds >= min_odds:
+                if edge_o >= min_edge and over_odds >= min_odds_val:
                     pick = ("over", line_val, over_odds, cal_p, edge_o, f"Mais de {line_val} Gols")
 
             # 2. FIFA Asian Handicap (Strict Edge > 5%)
             elif ch_key == "fifa_asian_handicap":
                 ah = odds_dict.get("asian_handicap", {}) if isinstance(odds_dict.get("asian_handicap"), dict) else {}
-                line_val = float(ah.get("line", 0.0))
+                raw_line = ah.get("line")
+                if raw_line is None:
+                    continue
+                line_val = float(raw_line)
                 h_odds = float(ah.get("home", 0.0))
                 a_odds = float(ah.get("away", 0.0))
                 if h_odds <= 1.05 and a_odds <= 1.05:
                     continue
+
+                if h_odds > 1.05 and a_odds <= 1.05:
+                    a_odds = get_complementary_odds(h_odds, target_vig)
+                elif a_odds > 1.05 and h_odds <= 1.05:
+                    h_odds = get_complementary_odds(a_odds, target_vig)
 
                 ml = odds_dict.get("money_line", odds_dict.get("draw_no_bet", {})) if isinstance(odds_dict.get("money_line", odds_dict.get("draw_no_bet", {})), dict) else {}
                 odds_info = {
                     "home_odds": h_odds, "away_odds": a_odds,
                     "ml_home_odds": float(ml.get("home", 0.0)), "ml_away_odds": float(ml.get("away", 0.0))
                 }
-                X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, line_val, odds_info, ko_dt)
+                X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, line_val, odds_info, ko_dt, fixture=fixture, league=league)
+                if X is None:
+                    continue
                 raw_p = model.predict_proba(X)[0, 1] if hasattr(model, "predict_proba") else model.model.predict_proba(X)[0, 1]
                 cal_p = float(calibrator.predict([raw_p])[0])
 
-                imp_p_home = 1.0 / h_odds if h_odds > 1.0 else 0.50
-                imp_p_away = 1.0 / a_odds if a_odds > 1.0 else 0.50
+                imp_p_home = 1.0 / h_odds
+                imp_p_away = 1.0 / a_odds
                 edge_h = cal_p - imp_p_home
                 edge_a = (1.0 - cal_p) - imp_p_away
 
-                if edge_h >= min_edge and h_odds >= min_odds:
+                if edge_h >= min_edge and h_odds >= min_odds_val and edge_h >= edge_a:
                     pick = ("home", line_val, h_odds, cal_p, edge_h, f"{h_team} (Handicap {line_val:+.1f})")
-                elif edge_a >= min_edge and a_odds >= min_odds:
+                elif edge_a >= min_edge and a_odds >= min_odds_val and edge_a > edge_h:
                     pick = ("away", -line_val, a_odds, 1.0 - cal_p, edge_a, f"{a_team} (Handicap {-line_val:+.1f})")
 
             # 3. FIFA Money Line (Draw No Bet, Strict Edge > 5%)
@@ -725,21 +874,32 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_odds: float
                 if h_odds <= 1.05 and a_odds <= 1.05:
                     continue
 
+                if h_odds > 1.05 and a_odds <= 1.05:
+                    a_odds = get_complementary_odds(h_odds, target_vig)
+                elif a_odds > 1.05 and h_odds <= 1.05:
+                    h_odds = get_complementary_odds(a_odds, target_vig)
+
                 odds_info = {"home_odds": h_odds, "away_odds": a_odds}
-                X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, 0.0, odds_info, ko_dt)
-                raw_p = model.predict_proba(X)[0] if hasattr(model, "predict_proba") else model.model.predict_proba(X)[0]
+                X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, 0.0, odds_info, ko_dt, fixture=fixture, league=league)
+                if X is None:
+                    continue
+                if hasattr(model, "model") and hasattr(model.model, "predict_proba"):
+                    raw_p = model.model.predict_proba(X)[0]
+                else:
+                    raw_p = model.predict_proba(X)[0]
+
                 cal_h, cal_a = calibrator
                 p_h = float(cal_h.predict([raw_p[0]])[0])
                 p_a = float(cal_a.predict([raw_p[2] if len(raw_p) > 2 else raw_p[1]])[0])
 
-                imp_p_h = 1.0 / h_odds if h_odds > 1.0 else 0.45
-                imp_p_a = 1.0 / a_odds if a_odds > 1.0 else 0.35
+                imp_p_h = 1.0 / h_odds
+                imp_p_a = 1.0 / a_odds
                 edge_h = p_h - imp_p_h
                 edge_a = p_a - imp_p_a
 
-                if edge_h >= min_edge and h_odds >= min_odds:
+                if edge_h >= min_edge and h_odds >= min_odds_val and edge_h >= edge_a:
                     pick = ("home", 0.0, h_odds, p_h, edge_h, f"{h_team} (Empate Anula)")
-                elif edge_a >= min_edge and a_odds >= min_odds:
+                elif edge_a >= min_edge and a_odds >= min_odds_val and edge_a > edge_h:
                     pick = ("away", 0.0, a_odds, p_a, edge_a, f"{a_team} (Empate Anula)")
 
             # 4. eBasket Money Line (Unchanged Edge >= 2%)
@@ -750,43 +910,60 @@ def evaluate_shadow_opportunities(matches: List[Dict[str, Any]], min_odds: float
                 if h_odds <= 1.05 and a_odds <= 1.05:
                     continue
 
+                if h_odds > 1.05 and a_odds <= 1.05:
+                    a_odds = get_complementary_odds(h_odds, target_vig)
+                elif a_odds > 1.05 and h_odds <= 1.05:
+                    h_odds = get_complementary_odds(a_odds, target_vig)
+
                 odds_info = {"home_odds": h_odds, "away_odds": a_odds}
-                X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, 0.0, odds_info, ko_dt)
+                X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, 0.0, odds_info, ko_dt, fixture=fixture, league=league)
+                if X is None:
+                    continue
                 raw_p = model.predict_proba(X)[0, 1] if hasattr(model, "predict_proba") else model.model.predict_proba(X)[0, 1]
                 cal_p = float(calibrator.predict([raw_p])[0])
 
-                imp_p_h = 1.0 / h_odds if h_odds > 1.0 else 0.50
-                imp_p_a = 1.0 / a_odds if a_odds > 1.0 else 0.50
+                imp_p_h = 1.0 / h_odds
+                imp_p_a = 1.0 / a_odds
                 edge_h = cal_p - imp_p_h
                 edge_a = (1.0 - cal_p) - imp_p_a
 
-                if edge_h >= min_edge and h_odds >= min_odds:
+                if edge_h >= min_edge and h_odds >= min_odds_val and edge_h >= edge_a:
                     pick = ("home", 0.0, h_odds, cal_p, edge_h, f"{h_team} (Vencedor)")
-                elif edge_a >= min_edge and a_odds >= min_odds:
+                elif edge_a >= min_edge and a_odds >= min_odds_val and edge_a > edge_h:
                     pick = ("away", 0.0, a_odds, 1.0 - cal_p, edge_a, f"{a_team} (Vencedor)")
 
             # 5. eBasket O/U (Unchanged Edge >= 2%)
             elif ch_key == "ebasket_ou":
                 ou = odds_dict.get("over_under", {}) if isinstance(odds_dict.get("over_under"), dict) else {}
-                line_val = float(ou.get("line", 110.5))
+                raw_line = ou.get("line")
+                if raw_line is None or float(raw_line) <= 0.0:
+                    continue
+                line_val = float(raw_line)
                 over_odds = float(ou.get("over", 0.0))
                 under_odds = float(ou.get("under", 0.0))
                 if over_odds <= 1.05 and under_odds <= 1.05:
                     continue
 
+                if over_odds > 1.05 and under_odds <= 1.05:
+                    under_odds = get_complementary_odds(over_odds, target_vig)
+                elif under_odds > 1.05 and over_odds <= 1.05:
+                    over_odds = get_complementary_odds(under_odds, target_vig)
+
                 odds_info = {"over_odds": over_odds, "under_odds": under_odds}
-                X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, line_val, odds_info, ko_dt)
+                X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, line_val, odds_info, ko_dt, fixture=fixture, league=league)
+                if X is None:
+                    continue
                 raw_p = model.predict_proba(X)[0, 1] if hasattr(model, "predict_proba") else model.model.predict_proba(X)[0, 1]
                 cal_p = regularize_calibrated_prob(float(calibrator.predict([raw_p])[0]))
 
-                imp_p_o = 1.0 / over_odds if over_odds > 1.0 else 0.50
-                imp_p_u = 1.0 / under_odds if under_odds > 1.0 else 0.50
+                imp_p_o = 1.0 / over_odds
+                imp_p_u = 1.0 / under_odds
                 edge_o = cal_p - imp_p_o
                 edge_u = (1.0 - cal_p) - imp_p_u
 
-                if edge_o >= min_edge and over_odds >= min_odds:
+                if edge_o >= min_edge and over_odds >= min_odds_val and edge_o >= edge_u:
                     pick = ("over", line_val, over_odds, cal_p, edge_o, f"Mais de {line_val} Pontos")
-                elif edge_u >= min_edge and under_odds >= min_odds:
+                elif edge_u >= min_edge and under_odds >= min_odds_val and edge_u > edge_o:
                     pick = ("under", line_val, under_odds, 1.0 - cal_p, edge_u, f"Menos de {line_val} Pontos")
 
             if not pick:
@@ -851,16 +1028,14 @@ def fetch_scores_for_pending_shadow_matches():
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
-    # Find pending matches where kickoff was sufficiently in the past (15m for FIFA, 25m for eBasket)
+    # Find pending matches where match duration has elapsed post-kickoff
     cur.execute("""
-        SELECT DISTINCT match_id, bet365_id, sport, fixture, kickoff_at_utc
-        FROM core.shadow_tips_eval
-        WHERE status = 'PENDING'
-          AND (
-              (sport = 'fifa' AND kickoff_at_utc < NOW() - INTERVAL '15 minutes')
-              OR (sport != 'fifa' AND kickoff_at_utc < NOW() - INTERVAL '25 minutes')
-          )
-        ORDER BY kickoff_at_utc DESC
+        SELECT DISTINCT s.match_id, s.bet365_id, s.sport, s.fixture, s.kickoff_at_utc
+        FROM core.shadow_tips_eval s
+        LEFT JOIN core.matches m ON s.match_id = m.match_id
+        WHERE s.status = 'PENDING'
+          AND NOW() >= (s.kickoff_at_utc + (INTERVAL '1 minute' * COALESCE(m.duration_minutes, CASE WHEN s.sport = 'ebasket' THEN 20 ELSE 8 END)))
+        ORDER BY s.kickoff_at_utc DESC
         LIMIT 50;
     """)
     pending_matches = cur.fetchall()
@@ -982,128 +1157,6 @@ def fetch_scores_for_pending_shadow_matches():
         if saved_count > 0:
             logger.info(f"Persisted {saved_count} verified match scores into core.shadow_results.")
 
-def settle_shadow_tips():
-    """Settles pending shadow tips against core.shadow_results (and fallback core.results)."""
-    fetch_scores_for_pending_shadow_matches()
-
-    conn = psycopg2.connect(DB_URL)
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-
-    cur.execute("""
-        SELECT s.id, s.match_id, s.bet365_id, s.sport, s.channel_key, s.side, s.line, s.odds,
-               sr.final_home_score,
-               sr.final_away_score
-        FROM core.shadow_tips_eval s
-        LEFT JOIN core.shadow_results sr ON (s.match_id = sr.match_id OR s.bet365_id = sr.bet365_id OR s.match_id = sr.bet365_id)
-        WHERE s.status = 'PENDING'
-          AND sr.final_home_score IS NOT NULL;
-    """)
-    pending = cur.fetchall()
-
-    settled_now = 0
-    update_cur = conn.cursor()
-
-    for tip in pending:
-        fh = float(tip["final_home_score"])
-        fa = float(tip["final_away_score"])
-        final_str = f"{int(fh)}-{int(fa)}"
-        odds = float(tip["odds"])
-        line = float(tip["line"]) if tip["line"] is not None else 0.0
-        side = str(tip["side"]).lower()
-        ch = tip["channel_key"]
-
-        outcome = "VOID"
-        net_units = 0.0
-
-        if "ou" in ch:
-            tot = fh + fa
-            diff = tot - line
-            if side == "over":
-                if diff > 0.25: outcome, net_units = "WIN", odds - 1.0
-                elif diff == 0.25: outcome, net_units = "HALF_WIN", 0.5 * (odds - 1.0)
-                elif diff == 0.0: outcome, net_units = "VOID", 0.0
-                elif diff == -0.25: outcome, net_units = "HALF_LOSS", -0.5
-                else: outcome, net_units = "LOSS", -1.0
-            else: # under
-                if diff < -0.25: outcome, net_units = "WIN", odds - 1.0
-                elif diff == -0.25: outcome, net_units = "HALF_WIN", 0.5 * (odds - 1.0)
-                elif diff == 0.0: outcome, net_units = "VOID", 0.0
-                elif diff == 0.25: outcome, net_units = "HALF_LOSS", -0.5
-                else: outcome, net_units = "LOSS", -1.0
-
-        elif "asian_handicap" in ch:
-            diff = (fa - fh) + line if side == "away" else (fh - fa) + line
-            if diff > 0.25: outcome, net_units = "WIN", odds - 1.0
-            elif diff == 0.25: outcome, net_units = "HALF_WIN", 0.5 * (odds - 1.0)
-            elif diff == 0.0: outcome, net_units = "VOID", 0.0
-            elif diff == -0.25: outcome, net_units = "HALF_LOSS", -0.5
-            else: outcome, net_units = "LOSS", -1.0
-
-        elif "money_line" in ch:
-            if "ebasket" in ch:
-                if (side == "home" and fh > fa) or (side == "away" and fa > fh):
-                    outcome, net_units = "WIN", odds - 1.0
-                else:
-                    outcome, net_units = "LOSS", -1.0
-            else: # FIFA DNB
-                if (side == "home" and fh > fa) or (side == "away" and fa > fh):
-                    outcome, net_units = "WIN", odds - 1.0
-                elif fh == fa:
-                    outcome, net_units = "VOID", 0.0
-                else:
-                    outcome, net_units = "LOSS", -1.0
-
-        update_cur.execute("""
-            UPDATE core.shadow_tips_eval
-            SET status = 'SETTLED',
-                final_score = %s,
-                outcome = %s,
-                net_units = %s,
-                pending_reason = 'NONE (Fully Settled)',
-                source = COALESCE(source, 'shadow_api_fetcher'),
-                time_pending = '0.0h (Resolved)',
-                settled_at_utc = NOW()
-            WHERE id = %s;
-        """, (final_str, outcome, round(net_units, 3), tip["id"]))
-        settled_now += 1
-
-    # -----------------------------------------------------------------------
-    # 4-Hour Rule: Auto-void stale pending fixtures (> 4 hours post-kickoff)
-    # -----------------------------------------------------------------------
-    update_cur.execute("""
-        UPDATE core.shadow_tips_eval
-        SET status = 'SETTLED',
-            final_score = 'ABANDONED',
-            outcome = 'VOID',
-            net_units = 0.000,
-            pending_reason = 'ABANDONED_FIXTURE (Exceeded 4h whistle window)',
-            source = COALESCE(source, 'shadow_api_fetcher'),
-            time_pending = ROUND(EXTRACT(EPOCH FROM (NOW() - kickoff_at_utc))/3600.0, 1)::text || 'h (Exceeded limit)',
-            settled_at_utc = COALESCE(kickoff_at_utc + INTERVAL '4 hours', NOW())
-        WHERE status = 'PENDING'
-          AND kickoff_at_utc < NOW() - INTERVAL '4 hours';
-    """)
-    abandoned_now = update_cur.rowcount
-    if abandoned_now > 0:
-        logger.info(f"4-Hour Rule applied: Auto-voided {abandoned_now} stale fixtures as ABANDONED_FIXTURE.")
-
-    # Update active fresh pending tips (< 4 hours) with real-time pending tracking fields
-    update_cur.execute("""
-        UPDATE core.shadow_tips_eval
-        SET pending_reason = 'AWAITING_MATCH_WHISTLE',
-            source = COALESCE(source, 'shadow_api_fetcher'),
-            time_pending = ROUND(EXTRACT(EPOCH FROM (NOW() - kickoff_at_utc))/3600.0, 1)::text || 'h'
-        WHERE status = 'PENDING';
-    """)
-
-    conn.commit()
-    conn.close()
-    if settled_now > 0:
-        logger.info(f"Settled {settled_now} shadow tips against verified whistle results.")
-
-# ---------------------------------------------------------------------------
-# Telemetry Dashboard
-# ---------------------------------------------------------------------------
 def calculate_single_settlement(ch: str, side: str, line: Optional[float], odds: float, fh: int, fa: int) -> Tuple[str, float]:
     """Calculates settlement outcome and net units given match scores."""
     outcome = "VOID"
@@ -1143,6 +1196,90 @@ def calculate_single_settlement(ch: str, side: str, line: Optional[float], odds:
                 outcome, net_units = "LOSS", -1.0
 
     return outcome, round(net_units, 3)
+
+def settle_shadow_tips():
+    """Settles pending shadow tips against core.shadow_results (and fallback core.results)."""
+    fetch_scores_for_pending_shadow_matches()
+
+    conn = psycopg2.connect(DB_URL)
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    cur.execute("""
+        SELECT s.id, s.match_id, s.bet365_id, s.sport, s.channel_key, s.side, s.line, s.odds,
+               sr.final_home_score,
+               sr.final_away_score
+        FROM core.shadow_tips_eval s
+        LEFT JOIN core.shadow_results sr ON (s.match_id = sr.match_id OR s.bet365_id = sr.bet365_id OR s.match_id = sr.bet365_id)
+        WHERE s.status = 'PENDING'
+          AND sr.final_home_score IS NOT NULL;
+    """)
+    pending = cur.fetchall()
+
+    settled_now = 0
+    update_cur = conn.cursor()
+
+    for tip in pending:
+        fh = float(tip["final_home_score"])
+        fa = float(tip["final_away_score"])
+        final_str = f"{int(fh)}-{int(fa)}"
+        odds = float(tip["odds"])
+        line = float(tip["line"]) if tip["line"] is not None else 0.0
+        side = str(tip["side"]).lower()
+        ch = tip["channel_key"]
+
+        outcome, net_units = calculate_single_settlement(ch, side, line, odds, int(fh), int(fa))
+
+        update_cur.execute("""
+            UPDATE core.shadow_tips_eval
+            SET status = 'SETTLED',
+                final_score = %s,
+                outcome = %s,
+                net_units = %s,
+                pending_reason = 'NONE (Fully Settled)',
+                source = COALESCE(source, 'shadow_api_fetcher'),
+                time_pending = '0.0h (Resolved)',
+                settled_at_utc = NOW()
+            WHERE id = %s;
+        """, (final_str, outcome, round(net_units, 3), tip["id"]))
+        settled_now += 1
+
+    # -----------------------------------------------------------------------
+    # Auto-void stale pending fixtures (> SHADOW_ABANDONED_HOURS post-kickoff)
+    # -----------------------------------------------------------------------
+    update_cur.execute("""
+        UPDATE core.shadow_tips_eval
+        SET status = 'SETTLED',
+            final_score = 'ABANDONED',
+            outcome = 'VOID',
+            net_units = 0.000,
+            pending_reason = 'ABANDONED_FIXTURE (Exceeded ' || %s::text || 'h whistle window)',
+            source = COALESCE(source, 'shadow_api_fetcher'),
+            time_pending = ROUND(EXTRACT(EPOCH FROM (NOW() - kickoff_at_utc))/3600.0, 1)::text || 'h (Exceeded limit)',
+            settled_at_utc = COALESCE(kickoff_at_utc + (INTERVAL '1 hour' * %s), NOW())
+        WHERE status = 'PENDING'
+          AND kickoff_at_utc < NOW() - (INTERVAL '1 hour' * %s);
+    """, (SHADOW_ABANDONED_HOURS, SHADOW_ABANDONED_HOURS, SHADOW_ABANDONED_HOURS))
+    abandoned_now = update_cur.rowcount
+    if abandoned_now > 0:
+        logger.info(f"Abandonment Rule applied: Auto-voided {abandoned_now} stale fixtures as ABANDONED_FIXTURE (exceeded {SHADOW_ABANDONED_HOURS}h).")
+
+    # Update active fresh pending tips with real-time pending tracking fields
+    update_cur.execute("""
+        UPDATE core.shadow_tips_eval
+        SET pending_reason = 'AWAITING_MATCH_WHISTLE',
+            source = COALESCE(source, 'shadow_api_fetcher'),
+            time_pending = ROUND(EXTRACT(EPOCH FROM (NOW() - kickoff_at_utc))/3600.0, 1)::text || 'h'
+        WHERE status = 'PENDING';
+    """)
+
+    conn.commit()
+    conn.close()
+    if settled_now > 0:
+        logger.info(f"Settled {settled_now} shadow tips against verified whistle results.")
+
+# ---------------------------------------------------------------------------
+# Telemetry Dashboard
+# ---------------------------------------------------------------------------
 
 def load_jsonl_candidates(start_date: str = "2026-09-10", end_date: str = "2026-09-30") -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
     """
@@ -1268,36 +1405,51 @@ def load_jsonl_candidates(start_date: str = "2026-09-10", end_date: str = "2026-
 
 def clean_and_sync_oct5_shadow_data(clean: bool = True):
     """
-    Cleans shadow tables (if requested) and reseeds all match opportunities from Sept 10th onwards
+    Cleans shadow tables (if requested) and reseeds all match opportunities from SHADOW_START_DATE onwards
     evaluating them exclusively with the re-evaluated models (*_final.joblib) and high edge filters.
     All data is strictly saved to core.shadow_tips_eval and core.shadow_results (core.results is UNTOUCHED).
     """
     logger.info("=" * 80)
-    logger.info(f"SYNCING SHADOW DATA FROM SEPT 10TH (Clean={clean}) WITH RE-EVALUATED MODELS")
+    logger.info(f"SYNCING SHADOW DATA FROM {SHADOW_START_DATE} (Clean={clean}) WITH RE-EVALUATED MODELS")
     logger.info("=" * 80)
 
+    init_shadow_db()
     mgr = get_shadow_model_manager()
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
-    # 1. Fetch candidate match opportunities since Sept 10th from both published_tips and shadow_tips_eval
+    # 1. Fetch candidate match opportunities since SHADOW_START_DATE from both published_tips and shadow_tips_eval
     cur.execute("""
         WITH raw_opps AS (
-            SELECT match_id, match_id as bet365_id, channel_key, sport, fixture, side, line, odds, kickoff_at_utc, published_at_utc as eval_time
-            FROM core.published_tips
-            WHERE published_at_utc >= '2026-09-10 00:00:00+00'
+            SELECT p.match_id, p.match_id as bet365_id, p.channel_key, p.sport, 
+                   m.league as league,
+                   p.fixture, 
+                   COALESCE(p.home_player, m.home_player) as home_player,
+                   COALESCE(p.away_player, m.away_player) as away_player,
+                   p.side, p.line, p.odds, p.kickoff_at_utc, p.published_at_utc as eval_time,
+                   m.duration_minutes
+            FROM core.published_tips p
+            LEFT JOIN core.matches m ON p.match_id = m.match_id
+            WHERE p.published_at_utc >= %s
             UNION
-            SELECT match_id, bet365_id, channel_key, sport, fixture, side, line, odds, kickoff_at_utc, evaluated_at_utc as eval_time
-            FROM core.shadow_tips_eval
-            WHERE kickoff_at_utc >= '2026-09-10 00:00:00+00'
+            SELECT s.match_id, s.bet365_id, s.channel_key, s.sport, 
+                   COALESCE(s.league, m.league) as league,
+                   s.fixture, 
+                   m.home_player,
+                   m.away_player,
+                   s.side, s.line, s.odds, s.kickoff_at_utc, s.evaluated_at_utc as eval_time,
+                   m.duration_minutes
+            FROM core.shadow_tips_eval s
+            LEFT JOIN core.matches m ON s.match_id = m.match_id
+            WHERE s.kickoff_at_utc >= %s
         )
         SELECT DISTINCT ON (COALESCE(NULLIF(bet365_id, ''), match_id), channel_key)
-            match_id, bet365_id, channel_key, sport, fixture, side, line, odds, kickoff_at_utc, eval_time
+            match_id, bet365_id, channel_key, sport, league, fixture, home_player, away_player, side, line, odds, kickoff_at_utc, eval_time, duration_minutes
         FROM raw_opps
         ORDER BY COALESCE(NULLIF(bet365_id, ''), match_id), channel_key, eval_time ASC;
-    """)
+    """, (SHADOW_START_DATE, SHADOW_START_DATE))
     opps = [dict(r) for r in cur.fetchall()]
-    logger.info(f"Loaded {len(opps)} candidate match opportunities from database since Sept 10th.")
+    logger.info(f"Loaded {len(opps)} candidate match opportunities from database since {SHADOW_START_DATE}.")
 
     # 2. Load verified scores from core.shadow_results AND core.results
     results_map = {}
@@ -1328,24 +1480,24 @@ def clean_and_sync_oct5_shadow_data(clean: bool = True):
     except Exception as e:
         logger.debug(f"core.results load note: {e}")
 
-    # 3. Load historical candidate matches from JSONL formatted datasets (Sept 10 to Sept 30)
-    jsonl_opps, jsonl_results = load_jsonl_candidates("2026-09-10", "2026-09-30")
-    logger.info(f"Loaded {len(jsonl_opps)} historical candidate opportunities from JSONL feeds.")
-    results_map.update(jsonl_results)
+    # 3. Load historical candidate matches from JSONL formatted datasets only if requested range covers prior dates
+    if SHADOW_START_DATE < "2026-10-01":
+        jsonl_opps, jsonl_results = load_jsonl_candidates("2026-09-10", "2026-09-30")
+        logger.info(f"Loaded {len(jsonl_opps)} historical candidate opportunities from JSONL feeds.")
+        results_map.update(jsonl_results)
 
-    # Merge candidates without duplicate (bet365_id, channel_key)
-    seen_opps = {
-        (str(o.get("bet365_id") or o["match_id"]), o["channel_key"]) for o in opps
-    }
-    for jo in jsonl_opps:
-        k = (str(jo.get("bet365_id") or jo["match_id"]), jo["channel_key"])
-        if k not in seen_opps:
-            seen_opps.add(k)
-            opps.append(jo)
+        seen_opps = {
+            (str(o.get("bet365_id") or o["match_id"]), o["channel_key"]) for o in opps
+        }
+        for jo in jsonl_opps:
+            k = (str(jo.get("bet365_id") or jo["match_id"]), jo["channel_key"])
+            if k not in seen_opps:
+                seen_opps.add(k)
+                opps.append(jo)
 
     # Sort chronologically by kickoff time
     opps.sort(key=lambda x: x["kickoff_at_utc"] if x.get("kickoff_at_utc") else datetime.min.replace(tzinfo=timezone.utc))
-    logger.info(f"Consolidated total candidate opportunities: {len(opps)} since Sept 10th.")
+    logger.info(f"Consolidated total candidate opportunities: {len(opps)}.")
     logger.info(f"Total verified final scores available: {len(results_map)}.")
 
     # 4. Clean shadow_tips_eval if requested
@@ -1354,7 +1506,6 @@ def clean_and_sync_oct5_shadow_data(clean: bool = True):
         cur.execute("TRUNCATE TABLE core.shadow_tips_eval RESTART IDENTITY;")
         conn.commit()
 
-    min_odds = 1.60
     tips_to_insert = []
     shadow_results_to_save = {}
 
@@ -1367,149 +1518,200 @@ def clean_and_sync_oct5_shadow_data(clean: bool = True):
         bet365_id = str(row.get("bet365_id") or raw_match_id)
         sport = row["sport"]
         fixture = row["fixture"] or ""
+        league_name = str(row.get("league") or "").strip()
+        if not league_name or league_name.lower() in ("none", "null"):
+            continue
         orig_side = str(row["side"] or "home").lower()
-        orig_line = float(row["line"]) if row["line"] is not None else 0.0
-        orig_odds = float(row["odds"]) if row["odds"] is not None else 1.90
+        if row.get("line") is None:
+            if ch_key in ("fifa_goals_ou", "fifa_asian_handicap", "ebasket_ou"):
+                continue
+            orig_line = 0.0
+        else:
+            orig_line = float(row["line"])
+
+        if ch_key in ("fifa_goals_ou", "ebasket_ou") and orig_line <= 0.0:
+            continue
+        if row.get("odds") is None or float(row["odds"]) <= 1.0:
+            continue
+        orig_odds = float(row["odds"])
         ko_time = row["kickoff_at_utc"]
+        if not ko_time:
+            continue
         eval_time = row["eval_time"] or ko_time
+
+        min_odds = CHANNEL_MIN_ODDS.get(ch_key, MIN_ODDS_THRESHOLD)
         min_edge = CHANNEL_MIN_EDGE.get(ch_key, 0.05)
+        target_vig = CHANNEL_TARGET_VIG.get(ch_key, 1.06)
+        dur_mins_row = row.get("duration_minutes")
+        dur_mins = float(dur_mins_row) if (dur_mins_row is not None and float(dur_mins_row) > 0) else mgr.get_tournament_duration(fixture, league_name, sport, dur_mins_row)
 
         bundle = mgr.bundles[ch_key]
         model = bundle["model"]
         calibrator = bundle.get("calibrator") or bundle.get("calibrators")
         feat_names = bundle["feature_names"]
 
-        players = re.findall(r'\(([^)]+)\)', fixture)
-        h_player = players[0].strip() if len(players) > 0 else "Player1"
-        a_player = players[1].strip() if len(players) > 1 else "Player2"
+        h_player = row.get("home_player")
+        a_player = row.get("away_player")
+        if not h_player or not a_player:
+            players = re.findall(r'\(([^)]+)\)', fixture)
+            if len(players) >= 2:
+                h_player = h_player or players[0].strip()
+                a_player = a_player or players[1].strip()
+        if not h_player or not a_player:
+            continue
 
-        h_team = fixture.split(" (")[0].strip() if " (" in fixture else "Home"
+        if " (" in fixture:
+            h_team = fixture.split(" (")[0].strip()
+        else:
+            continue
+
         if " vs " in fixture:
             a_part = fixture.split(" vs ")[1]
-            a_team = a_part.split(" (")[0].strip() if " (" in a_part else "Away"
+            a_team = a_part.split(" (")[0].strip() if " (" in a_part else a_part.strip()
         elif " x " in fixture:
             a_part = fixture.split(" x ")[1]
-            a_team = a_part.split(" (")[0].strip() if " (" in a_part else "Away"
+            a_team = a_part.split(" (")[0].strip() if " (" in a_part else a_part.strip()
         else:
-            a_team = "Away"
+            continue
+
+        if not h_team or not a_team:
+            continue
 
         pick = None
 
-        # 1. FIFA Goals O/U (Strict Edge >= 8%)
+        # 1. FIFA Goals O/U (Strict Edge >= 3%, OVER-Only)
         if ch_key == "fifa_goals_ou":
-            line_val = orig_line if orig_line > 0 else 2.5
+            if orig_line <= 0.0:
+                continue
+            line_val = orig_line
             if orig_side == "over":
                 o_odds = orig_odds
-                u_odds = get_complementary_odds(orig_odds, 1.06)
+                u_odds = get_complementary_odds(orig_odds, target_vig)
             else:
                 u_odds = orig_odds
-                o_odds = get_complementary_odds(orig_odds, 1.06)
+                o_odds = get_complementary_odds(orig_odds, target_vig)
 
-            odds_info = {"over_odds": o_odds, "under_odds": u_odds}
-            X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, line_val, odds_info, ko_time)
+            odds_info = {"over_odds": o_odds, "under_odds": u_odds, "duration_minutes": dur_mins}
+            X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, line_val, odds_info, ko_time, fixture=fixture, league=league_name, duration_minutes=dur_mins)
+            if X is None:
+                continue
             raw_p = model.predict_proba(X)[0, 1] if hasattr(model, "predict_proba") else model.model.predict_proba(X)[0, 1]
             cal_p = float(calibrator.predict([raw_p])[0])
-            imp_p_over = 1.0 / o_odds if o_odds > 1.0 else 0.50
+            imp_p_over = 1.0 / o_odds
             edge_o = cal_p - imp_p_over
-            edge_u = (1.0 - cal_p) - (1.0 / u_odds if u_odds > 1.0 else 0.50)
 
+            # Enforce Specification Rule: OVER-Only
             if edge_o >= min_edge and o_odds >= min_odds:
                 pick = ("over", line_val, o_odds, cal_p, edge_o, f"Mais de {line_val} Gols")
-            elif edge_u >= min_edge and u_odds >= min_odds:
-                pick = ("under", line_val, u_odds, 1.0 - cal_p, edge_u, f"Menos de {line_val} Gols")
 
         # 2. FIFA Asian Handicap (Strict Edge >= 5%)
         elif ch_key == "fifa_asian_handicap":
             line_val = orig_line
             if orig_side == "home":
                 h_odds = orig_odds
-                a_odds = get_complementary_odds(orig_odds, 1.06)
+                a_odds = get_complementary_odds(orig_odds, target_vig)
             else:
                 a_odds = orig_odds
-                h_odds = get_complementary_odds(orig_odds, 1.06)
+                h_odds = get_complementary_odds(orig_odds, target_vig)
 
-            odds_info = {"home_odds": h_odds, "away_odds": a_odds}
-            X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, line_val, odds_info, ko_time)
+            odds_info = {"home_odds": h_odds, "away_odds": a_odds, "duration_minutes": dur_mins}
+            X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, line_val, odds_info, ko_time, fixture=fixture, league=league_name, duration_minutes=dur_mins)
+            if X is None:
+                continue
             raw_p = model.predict_proba(X)[0, 1] if hasattr(model, "predict_proba") else model.model.predict_proba(X)[0, 1]
             cal_p = float(calibrator.predict([raw_p])[0])
-            imp_p_home = 1.0 / h_odds if h_odds > 1.0 else 0.50
+            imp_p_home = 1.0 / h_odds
+            imp_p_away = 1.0 / a_odds
             edge_h = cal_p - imp_p_home
-            edge_a = (1.0 - cal_p) - (1.0 / a_odds if a_odds > 1.0 else 0.50)
+            edge_a = (1.0 - cal_p) - imp_p_away
 
-            if edge_h >= min_edge and h_odds >= min_odds:
+            if edge_h >= min_edge and h_odds >= min_odds and edge_h >= edge_a:
                 pick = ("home", line_val, h_odds, cal_p, edge_h, f"{h_team} (Handicap {line_val:+.1f})")
-            elif edge_a >= min_edge and a_odds >= min_odds:
+            elif edge_a >= min_edge and a_odds >= min_odds and edge_a > edge_h:
                 pick = ("away", -line_val, a_odds, 1.0 - cal_p, edge_a, f"{a_team} (Handicap {-line_val:+.1f})")
 
         # 3. FIFA Money Line (Strict Edge >= 5%)
         elif ch_key == "fifa_money_line":
             if orig_side == "home":
                 h_odds = orig_odds
-                a_odds = get_complementary_odds(orig_odds, 1.07)
+                a_odds = get_complementary_odds(orig_odds, target_vig)
             else:
                 a_odds = orig_odds
-                h_odds = get_complementary_odds(orig_odds, 1.07)
+                h_odds = get_complementary_odds(orig_odds, target_vig)
 
-            odds_info = {"home_odds": h_odds, "away_odds": a_odds}
-            X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, 0.0, odds_info, ko_time)
-            raw_p = model.predict_proba(X)[0] if hasattr(model, "predict_proba") else model.model.predict_proba(X)[0]
+            odds_info = {"home_odds": h_odds, "away_odds": a_odds, "duration_minutes": dur_mins}
+            X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, 0.0, odds_info, ko_time, fixture=fixture, league=league_name, duration_minutes=dur_mins)
+            if X is None:
+                continue
+            if hasattr(model, "model") and hasattr(model.model, "predict_proba"):
+                raw_p = model.model.predict_proba(X)[0]
+            else:
+                raw_p = model.predict_proba(X)[0]
+
             cal_h, cal_a = calibrator
             p_h = float(cal_h.predict([raw_p[0]])[0])
             p_a = float(cal_a.predict([raw_p[2] if len(raw_p) > 2 else raw_p[1]])[0])
-            imp_p_h = 1.0 / h_odds if h_odds > 1.0 else 0.45
-            imp_p_a = 1.0 / a_odds if a_odds > 1.0 else 0.35
+            imp_p_h = 1.0 / h_odds
+            imp_p_a = 1.0 / a_odds
             edge_h = p_h - imp_p_h
             edge_a = p_a - imp_p_a
 
-            if edge_h >= min_edge and h_odds >= min_odds:
+            if edge_h >= min_edge and h_odds >= min_odds and edge_h >= edge_a:
                 pick = ("home", 0.0, h_odds, p_h, edge_h, f"{h_team} (Empate Anula)")
-            elif edge_a >= min_edge and a_odds >= min_odds:
+            elif edge_a >= min_edge and a_odds >= min_odds and edge_a > edge_h:
                 pick = ("away", 0.0, a_odds, p_a, edge_a, f"{a_team} (Empate Anula)")
 
         # 4. eBasket Money Line (Edge >= 2%)
         elif ch_key == "ebasket_money_line":
             if orig_side == "home":
                 h_odds = orig_odds
-                a_odds = get_complementary_odds(orig_odds, 1.05)
+                a_odds = get_complementary_odds(orig_odds, target_vig)
             else:
                 a_odds = orig_odds
-                h_odds = get_complementary_odds(orig_odds, 1.05)
+                h_odds = get_complementary_odds(orig_odds, target_vig)
 
-            odds_info = {"home_odds": h_odds, "away_odds": a_odds}
-            X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, 0.0, odds_info, ko_time)
+            odds_info = {"home_odds": h_odds, "away_odds": a_odds, "duration_minutes": dur_mins}
+            X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, 0.0, odds_info, ko_time, fixture=fixture, league=league_name, duration_minutes=dur_mins)
+            if X is None:
+                continue
             raw_p = model.predict_proba(X)[0, 1] if hasattr(model, "predict_proba") else model.model.predict_proba(X)[0, 1]
             cal_p = float(calibrator.predict([raw_p])[0])
-            imp_p_h = 1.0 / h_odds if h_odds > 1.0 else 0.50
-            imp_p_a = 1.0 / a_odds if a_odds > 1.0 else 0.50
+            imp_p_h = 1.0 / h_odds
+            imp_p_a = 1.0 / a_odds
             edge_h = cal_p - imp_p_h
             edge_a = (1.0 - cal_p) - imp_p_a
 
-            if edge_h >= min_edge and h_odds >= min_odds:
-                pick = ("home", 0.0, h_odds, cal_p, edge_h, f"{h_team} (Vencer)")
-            elif edge_a >= min_edge and a_odds >= min_odds:
-                pick = ("away", 0.0, a_odds, 1.0 - cal_p, edge_a, f"{a_team} (Vencer)")
+            if edge_h >= min_edge and h_odds >= min_odds and edge_h >= edge_a:
+                pick = ("home", 0.0, h_odds, cal_p, edge_h, f"{h_team} (Vencedor)")
+            elif edge_a >= min_edge and a_odds >= min_odds and edge_a > edge_h:
+                pick = ("away", 0.0, a_odds, 1.0 - cal_p, edge_a, f"{a_team} (Vencedor)")
 
         # 5. eBasket O/U (Edge >= 2%)
         elif ch_key == "ebasket_ou":
-            line_val = orig_line if orig_line > 0 else 110.5
+            if orig_line <= 0.0:
+                continue
+            line_val = orig_line
             if orig_side == "over":
                 o_odds = orig_odds
-                u_odds = get_complementary_odds(orig_odds, 1.05)
+                u_odds = get_complementary_odds(orig_odds, target_vig)
             else:
                 u_odds = orig_odds
-                o_odds = get_complementary_odds(orig_odds, 1.05)
+                o_odds = get_complementary_odds(orig_odds, target_vig)
 
-            odds_info = {"over_odds": o_odds, "under_odds": u_odds}
-            X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, line_val, odds_info, ko_time)
+            odds_info = {"over_odds": o_odds, "under_odds": u_odds, "duration_minutes": dur_mins}
+            X = mgr.build_feature_vector(ch_key, sport, h_player, a_player, line_val, odds_info, ko_time, fixture=fixture, league=league_name, duration_minutes=dur_mins)
+            if X is None:
+                continue
             raw_p = model.predict_proba(X)[0, 1] if hasattr(model, "predict_proba") else model.model.predict_proba(X)[0, 1]
             cal_p = regularize_calibrated_prob(float(calibrator.predict([raw_p])[0]))
-            imp_p_o = 1.0 / o_odds if o_odds > 1.0 else 0.50
+            imp_p_o = 1.0 / o_odds
+            imp_p_u = 1.0 / u_odds
             edge_o = cal_p - imp_p_o
-            edge_u = (1.0 - cal_p) - (1.0 / u_odds if u_odds > 1.0 else 0.50)
+            edge_u = (1.0 - cal_p) - imp_p_u
 
-            if edge_o >= min_edge and o_odds >= min_odds:
+            if edge_o >= min_edge and o_odds >= min_odds and edge_o >= edge_u:
                 pick = ("over", line_val, o_odds, cal_p, edge_o, f"Mais de {line_val} Pontos")
-            elif edge_u >= min_edge and u_odds >= min_odds:
+            elif edge_u >= min_edge and u_odds >= min_odds and edge_u > edge_o:
                 pick = ("under", line_val, u_odds, 1.0 - cal_p, edge_u, f"Menos de {line_val} Pontos")
 
         if pick is not None:
@@ -1525,7 +1727,10 @@ def clean_and_sync_oct5_shadow_data(clean: bool = True):
                 final_score = f"{fh}-{fa}"
                 settled_at = m_res.get("settled_at_utc")
                 if not settled_at or (ko_time and settled_at <= ko_time):
-                    duration = timedelta(minutes=15) if sport == "fifa" else timedelta(minutes=20)
+                    if sport == "ebasket":
+                        duration = timedelta(minutes=dur_mins + 15.0) if dur_mins else timedelta(minutes=35)
+                    else:
+                        duration = timedelta(minutes=dur_mins + 3.0)
                     settled_at = (ko_time + duration) if ko_time else (eval_time + duration)
                 pending_reason = "NONE (Fully Settled)"
                 src = "shadow_api_fetcher"
@@ -1535,16 +1740,15 @@ def clean_and_sync_oct5_shadow_data(clean: bool = True):
                         raw_match_id, bet365_id, sport, fh, fa, settled_at, "historic_sync"
                     )
             else:
-                # 4-Hour Rule: Auto-void stale fixtures exceeding 4 hours post-kickoff
                 now_utc = datetime.now(timezone.utc)
                 age_hrs = (now_utc - ko_time).total_seconds() / 3600.0 if ko_time else 0.0
-                if age_hrs >= 4.0:
+                if age_hrs >= SHADOW_ABANDONED_HOURS:
                     status = "SETTLED"
                     final_score = "ABANDONED"
                     outcome = "VOID"
                     net_units = 0.000
-                    settled_at = ko_time + timedelta(hours=4) if ko_time else now_utc
-                    pending_reason = "ABANDONED_FIXTURE (Exceeded 4h whistle window)"
+                    settled_at = ko_time + timedelta(hours=SHADOW_ABANDONED_HOURS) if ko_time else now_utc
+                    pending_reason = f"ABANDONED_FIXTURE (Exceeded {SHADOW_ABANDONED_HOURS}h whistle window)"
                     src = "shadow_api_fetcher"
                     time_pending = f"{round(age_hrs, 1)}h (Exceeded limit)"
                 else:
@@ -1558,7 +1762,7 @@ def clean_and_sync_oct5_shadow_data(clean: bool = True):
                     time_pending = f"{round(age_hrs, 1)}h"
 
             tips_to_insert.append((
-                raw_match_id, bet365_id, sport, ch_key, "eSports", fixture,
+                raw_match_id, bet365_id, sport, ch_key, league_name, fixture,
                 bundle.get("market_name", ch_key), pick_str, side, line, odds,
                 round(imp_prob, 4), round(float(model_p), 4), round(float(edge), 4),
                 status, final_score, outcome, net_units, ko_time, eval_time, settled_at,
@@ -1610,7 +1814,7 @@ def clean_and_sync_oct5_shadow_data(clean: bool = True):
     print_shadow_telemetry()
 
 def print_shadow_telemetry():
-    """Prints live performance telemetry from core.shadow_tips_eval for Sept 10th onwards."""
+    """Prints live performance telemetry from core.shadow_tips_eval for SHADOW_START_DATE onwards."""
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
@@ -1625,14 +1829,15 @@ def print_shadow_telemetry():
                COUNT(*) FILTER (WHERE outcome = 'HALF_LOSS') as half_losses,
                COALESCE(SUM(net_units), 0.0) as net_units
         FROM core.shadow_tips_eval
-        WHERE kickoff_at_utc >= '2026-09-10 00:00:00+00'
+        WHERE kickoff_at_utc >= %s
         GROUP BY channel_key;
-    """)
+    """, (SHADOW_START_DATE,))
     rows = cur.fetchall()
     conn.close()
 
+    start_label = SHADOW_START_DATE.split()[0]
     print("\n" + "=" * 92)
-    print(" SHADOW MODE TELEMETRY (RE-EVALUATED MODELS | OCT 5TH - PRESENT)")
+    print(f" SHADOW MODE TELEMETRY (RE-EVALUATED MODELS | {start_label} - PRESENT)")
     print("=" * 92)
     print(f"{'Channel':<22} | {'Total':<6} | {'W-L-V (HW/HL)':<18} | {'Net Units':<10} | {'Win Rate':<10} | {'ROI':<8} | {'Pending'}")
     print("-" * 92)

@@ -35,3 +35,6 @@ build/
 *.egg-info/
 
 *.tar
+ 
+# Archived test audit and validation files
+archive/

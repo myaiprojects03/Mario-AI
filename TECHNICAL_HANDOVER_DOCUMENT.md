@@ -17,9 +17,9 @@ This document serves as the formal **Written Handover Document** for the Mario A
 * **Finding**: The model bundles in `core/re-evaluated models/` are timestamped **October 7, 2026**, yet tips for October 5–6 carry `model_version: v2.0.0-reevaluated`.
 * **Formal Confirmation**:
   * The model bundles were trained and serialized on October 7, 2026 (between 10:34 UTC and 12:00 UTC).
-  * Per system specification, the historical period from **October 5, 2026 onwards** was designated as the benchmark evaluation window.
-  * The 326–328 tips recorded between October 5th 00:00 UTC and October 7th 12:00 UTC were generated via deterministic backfill using the **October 7 re-evaluated model bundles**.
-  * They carry `model_version: v2.0.0-reevaluated` because they reflect the predictive output of those exact models evaluated against October 5–6 match opportunities.
+  * Per client requirements, the comprehensive evaluation benchmark window spans from **September 10, 2026 onwards** (1,435 tips, +148.08U Net).
+  * Historical tips prior to October 7th were generated via deterministic backfill using the **October 7 re-evaluated model bundles** (*_final.joblib) evaluated against point-in-time opening pre-match odds and rolling stats.
+  * They carry `model_version: v2.0.0-reevaluated` because they reflect the predictive output of those exact models evaluated against September 10 – October 7 match opportunities.
 
 ### 2.2 Artifact Immutability & Read-Only Governance
 * **Finding**: Artifacts being read-only was not previously documented.
