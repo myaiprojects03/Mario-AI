@@ -11,6 +11,7 @@ import hashlib
 import re
 import threading
 import logging
+from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional, Tuple, Set
 
@@ -40,6 +41,7 @@ from core.ingestion.jarbet_client import JarBetClient
 from core.dashboard.dashboard_app import app
 try:
     from markets.fifa_goals_ou.features import build_fifa_goals_ou_features
+    from markets.fifa_asian_handicap.features import AH_FEATURE_COLUMNS, build_fifa_asian_handicap_features
     from markets.fifa_asian_handicap.v3_multiline_kelly_filtering.features import build_fifa_ah_v3_features
     from markets.fifa_money_line.v3_dnb_synthetic_features.features import build_fifa_ml_v3_features
     from markets.ebasket_money_line.v3_dnb_synthetic_features.features import build_ebasket_ml_v3_features
@@ -47,6 +49,8 @@ try:
     from markets._shared.multiline_v3_features import calculate_quarter_kelly_stake
 except ImportError:
     build_fifa_goals_ou_features = None
+    AH_FEATURE_COLUMNS = []
+    build_fifa_asian_handicap_features = None
     build_fifa_ah_v3_features = None
     build_fifa_ml_v3_features = None
     build_ebasket_ml_v3_features = None
@@ -94,28 +98,230 @@ TARGET_MINS = float(os.getenv("TARGET_KICKOFF_MINS", "3.0"))
 
 
 class ProductionModelManager:
-    """Manages loading and memory persistence of all 5 production models."""
+    """Manages loading and memory persistence of production models and dynamic player histories."""
 
     def __init__(self):
         self.models: Dict[str, Any] = {}
+        self.player_history: Dict[Tuple[str, str], List[Tuple[float, float, int, bool, Any]]] = defaultdict(list)
+        self.h2h_history: Dict[Tuple[str, str, str], List[Tuple[float, float, int]]] = defaultdict(list)
+        self.league_averages: Dict[str, Tuple[float, float]] = {}
+        self.last_stats_refresh: float = 0.0
         self.load_models()
+        self.refresh_player_stats()
 
     def load_models(self):
-        model_files = {
-            "fifa_goals_ou": "fifa_goals_ou_model_final.joblib",
-            "fifa_asian_handicap": "fifa_asian_handicap_model_v3.0.0.joblib",
-            "fifa_money_line": "fifa_money_line_model_v3.0.0.joblib",
-            "ebasket_money_line": "ebasket_money_line_model_v3.0.0.joblib",
-            "ebasket_ou": "ebasket_ou_model_v3.0.0.joblib",
+        model_candidates = {
+            "fifa_goals_ou": ["fifa_goals_ou_model_final.joblib"],
+            "fifa_asian_handicap": ["fifa_asian_handicap_model_final.joblib", "fifa_asian_handicap_model_v3.0.0.joblib"],
+            "fifa_money_line": ["fifa_money_line_model_final.joblib", "fifa_money_line_model_v3.0.0.joblib"],
+            "ebasket_money_line": ["ebasket_money_line_model_final.joblib", "ebasket_money_line_model_v3.0.0.joblib"],
+            "ebasket_ou": ["ebasket_ou_model_final.joblib", "ebasket_ou_model_v3.0.0.joblib"],
         }
 
-        for market, fname in model_files.items():
-            fpath = os.path.join(MODEL_DIR, fname)
-            if os.path.exists(fpath):
-                self.models[market] = joblib.load(fpath)
-                logger.info(f"Loaded production model for {market} from {fpath}")
-            else:
-                logger.warning(f"Production model file not found: {fpath}")
+        candidate_dirs = [
+            MODEL_DIR,
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "production_models"),
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "core", "re-evaluated models")
+        ]
+
+        for market, filenames in model_candidates.items():
+            loaded = False
+            for fname in filenames:
+                for cdir in candidate_dirs:
+                    fpath = os.path.join(cdir, fname)
+                    if os.path.exists(fpath):
+                        try:
+                            bundle = joblib.load(fpath)
+                            self.models[market] = bundle
+                            ver = bundle.get("model_version", "v1.0") if isinstance(bundle, dict) else "raw"
+                            logger.info(f"Loaded production model for {market} ({ver}) from {fpath}")
+                            loaded = True
+                            break
+                        except Exception as load_err:
+                            logger.error(f"Failed loading model candidate {fpath}: {load_err}")
+                if loaded:
+                    break
+            if not loaded:
+                logger.warning(f"Production model file not found for {market}")
+
+    def refresh_player_stats(self):
+        """Refreshes chronological match history and player profiles from database (read-only)."""
+        now = time.time()
+        if now - self.last_stats_refresh < 300.0 and self.player_history:
+            return
+
+        db_url = os.getenv("DATABASE_URL") or settings.DATABASE_URL
+        if not db_url:
+            return
+
+        try:
+            conn = psycopg2.connect(db_url, connect_timeout=5)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT m.sport, 
+                       LOWER(TRIM(m.home_player)) as h_p, 
+                       LOWER(TRIM(m.away_player)) as a_p, 
+                       r.final_home_score as h_s, 
+                       r.final_away_score as a_s,
+                       m.match_start_time
+                FROM core.results r 
+                JOIN core.matches m ON r.match_id = m.match_id
+                WHERE r.final_home_score IS NOT NULL 
+                  AND r.final_away_score IS NOT NULL
+                  AND m.home_player IS NOT NULL 
+                  AND m.away_player IS NOT NULL
+                ORDER BY m.match_start_time ASC;
+            """)
+            rows = cur.fetchall()
+            conn.close()
+
+            p_hist = defaultdict(list)
+            h2h_hist = defaultdict(list)
+            leg_h = defaultdict(list)
+            leg_a = defaultdict(list)
+
+            for sport, hp, ap, hs, as_, dt in rows:
+                if not hp or not ap or hs is None or as_ is None:
+                    continue
+                hs_f, as_f = float(hs), float(as_)
+                h_res = 1 if hs_f > as_f else (0 if hs_f == as_f else -1)
+                a_res = 1 if as_f > hs_f else (0 if as_f == hs_f else -1)
+
+                p_hist[(sport, hp)].append((hs_f, as_f, h_res, True, dt))
+                p_hist[(sport, ap)].append((as_f, hs_f, a_res, False, dt))
+                h2h_hist[(sport, hp, ap)].append((hs_f, as_f, h_res))
+                leg_h[sport].append(hs_f)
+                leg_a[sport].append(as_f)
+
+            self.league_win_rates = {}
+            for sport in leg_h:
+                if leg_h[sport]:
+                    self.league_averages[sport] = (float(np.mean(leg_h[sport])), float(np.mean(leg_a[sport])))
+                    tot_m = len(leg_h[sport])
+                    h_wins = sum(1 for h, a in zip(leg_h[sport], leg_a[sport]) if h > a)
+                    self.league_win_rates[sport] = float(h_wins) / max(1, tot_m)
+
+            self.player_history = p_hist
+            self.h2h_history = h2h_hist
+            self.last_stats_refresh = now
+            logger.info(f"ProductionModelManager: Indexed {len(p_hist)} player profiles, {len(h2h_hist)} H2H matchups from database ground truth.")
+        except Exception as e:
+            logger.warning(f"ProductionModelManager player stats refresh note: {e}")
+
+    @staticmethod
+    def get_clean_player_name(player: str) -> str:
+        if not player:
+            return ""
+        clean_p = str(player).strip().lower()
+        m_handle = re.search(r"\(([^)]+)\)", clean_p)
+        if m_handle:
+            return m_handle.group(1).strip()
+        return clean_p
+
+    def get_player_profile(self, sport: str, player: str, client: Optional[Any] = None) -> Dict[str, Any]:
+        p_clean = self.get_clean_player_name(player)
+        hist = list(self.player_history.get((sport, p_clean), []))
+
+        # Dynamic API Ground-Truth: If player has fewer than 3 matches in DB, query JarvisBet API history feed
+        if (not hist or len(hist) < 3) and client is not None:
+            try:
+                for param_k in ["homeName", "awayName"]:
+                    resp = client._execute_request("GET", "/history/pre", params={param_k: p_clean})
+                    if resp.status_code == 200:
+                        for hm in (resp.json() or []):
+                            h_obj = hm.get("home", {}) if isinstance(hm.get("home"), dict) else {}
+                            a_obj = hm.get("away", {}) if isinstance(hm.get("away"), dict) else {}
+                            hg = h_obj.get("goals")
+                            ag = a_obj.get("goals")
+                            if hg is not None and ag is not None:
+                                hg_f, ag_f = float(hg), float(ag)
+                                h_name = str(h_obj.get("name", "")).strip().lower()
+                                is_home = (p_clean in h_name)
+                                my_score = hg_f if is_home else ag_f
+                                opp_score = ag_f if is_home else hg_f
+                                res = 1 if my_score > opp_score else (0 if my_score == opp_score else -1)
+                                hist.append((my_score, opp_score, res, is_home, hm.get("startedAt", "")))
+                if hist:
+                    self.player_history[(sport, p_clean)] = hist
+            except Exception:
+                pass
+
+        # Dynamic empirical database baselines (populated from core.results ground truth)
+        leg_avg = self.league_averages.get(sport, (2.57, 2.59) if sport == "fifa" else (55.0, 55.0))
+        def_win_rate = self.league_win_rates.get(sport, 0.396 if sport == "fifa" else 0.45)
+        def_sc = float(leg_avg[0])
+        def_cc = float(leg_avg[1])
+
+        if not hist or len(hist) < 3:
+            return {
+                'sc_5': def_sc, 'sc_10': def_sc,
+                'cc_5': def_cc, 'cc_10': def_cc,
+                'win_rate_5': def_win_rate, 'win_rate_10': def_win_rate,
+                'reliable_5': False, 'reliable_10': False,
+                'matches_count': len(hist), 'history': hist
+            }
+
+        last_5 = hist[-5:]
+        last_10 = hist[-10:]
+
+        sc_5 = float(np.mean([x[0] for x in last_5]))
+        sc_10 = float(np.mean([x[0] for x in last_10]))
+        cc_5 = float(np.mean([x[1] for x in last_5]))
+        cc_10 = float(np.mean([x[1] for x in last_10]))
+        w_10 = sum(1 for x in last_10 if x[2] == 1) / len(last_10)
+
+        return {
+            'sc_5': sc_5, 'sc_10': sc_10,
+            'cc_5': cc_5, 'cc_10': cc_10,
+            'win_rate_5': sum(1 for x in last_5 if x[2] == 1) / len(last_5),
+            'win_rate_10': w_10,
+            'reliable_5': len(hist) >= 3,
+            'reliable_10': len(hist) >= 5,
+            'matches_count': len(hist),
+            'history': hist
+        }
+
+    def get_h2h_stats(self, sport: str, p1: str, p2: str, default_exp_tot: float, client: Optional[Any] = None) -> Tuple[float, float, float, float]:
+        p1_clean = self.get_clean_player_name(p1)
+        p2_clean = self.get_clean_player_name(p2)
+
+        m1 = self.h2h_history.get((sport, p1_clean, p2_clean), [])
+        m2 = [(x[1], x[0], -x[2]) for x in self.h2h_history.get((sport, p2_clean, p1_clean), [])]
+        all_m = list(m1 + m2)
+
+        # Dynamic API Ground-Truth: If no H2H in DB, query API feed
+        if not all_m and client is not None:
+            try:
+                resp = client._execute_request("GET", "/history/pre", params={"homeName": p1_clean})
+                if resp.status_code == 200:
+                    for hm in (resp.json() or []):
+                        h_name = str(hm.get("home", {}).get("name", "")).strip().lower()
+                        a_name = str(hm.get("away", {}).get("name", "")).strip().lower()
+                        if (p1_clean in h_name and p2_clean in a_name) or (p2_clean in h_name and p1_clean in a_name):
+                            hg = hm.get("home", {}).get("goals")
+                            ag = hm.get("away", {}).get("goals")
+                            if hg is not None and ag is not None:
+                                hg_f, ag_f = float(hg), float(ag)
+                                if p1_clean in h_name:
+                                    res = 1 if hg_f > ag_f else (0 if hg_f == ag_f else -1)
+                                    all_m.append((hg_f, ag_f, res))
+                                else:
+                                    res = 1 if ag_f > hg_f else (0 if ag_f == hg_f else -1)
+                                    all_m.append((ag_f, hg_f, res))
+                if all_m:
+                    self.h2h_history[(sport, p1_clean, p2_clean)] = all_m
+            except Exception:
+                pass
+
+        def_away_win = self.league_win_rates.get(sport, 0.396 if sport == "fifa" else 0.45)
+        if not all_m:
+            return 0.0, def_away_win, default_exp_tot, 0.0
+
+        cnt = float(len(all_m))
+        win_rate_away = sum(1 for x in all_m if x[2] == -1) / cnt
+        mean_combined = float(np.mean([x[0] + x[1] for x in all_m]))
+        mean_diff = float(np.mean([x[0] - x[1] for x in all_m]))
+        return cnt, win_rate_away, mean_combined, mean_diff
 GLOBAL_MODEL_MANAGER: Optional[ProductionModelManager] = None
 PLAYER_STATS_CACHE: Dict[str, Tuple[float, float, int]] = {}
 
@@ -188,7 +394,8 @@ def evaluate_market_opportunity(
     home_team: str,
     away_team: str,
     min_odds: float = 1.60,
-    min_edge: float = 0.02
+    min_edge: float = 0.02,
+    client: Optional[Any] = None
 ) -> Optional[Dict[str, Any]]:
     """
     Evaluates live match using trained production ML models to determine genuine positive EV opportunities.
@@ -363,50 +570,120 @@ def evaluate_market_opportunity(
             }
         return None
 
-    # 3. FIFA Asian Handicap
+    # 3. FIFA Asian Handicap (Re-evaluated Model with 23 Features & Isotonic Calibration)
     elif m_key == "fifa_asian_handicap":
         ah = odds_dict.get("asian_handicap", {}) if isinstance(odds_dict.get("asian_handicap"), dict) else {}
         line_val = float(ah.get("line", 0.0))
         home_odds = float(ah.get("home", 0.0))
         away_odds = float(ah.get("away", 0.0))
 
-        if home_odds <= 1.0 and away_odds <= 1.0:
+        if home_odds <= 1.05 and away_odds <= 1.05:
             return None
 
-        model_obj = mgr.models.get("fifa_asian_handicap")
+        # Derive true market vig dynamically from offered odds
+        if home_odds > 1.0 and away_odds > 1.0:
+            target_vig = (1.0 / home_odds) + (1.0 / away_odds)
+        else:
+            target_vig = 1.06
 
-        X = np.zeros((1, 22), dtype=float)
-        X[0, 0] = 1.0
-        X[0, 1] = 1.0
-        X[0, 2] = h_sc
-        X[0, 3] = h_sc
-        X[0, 4] = h_cc
-        X[0, 5] = h_cc
-        X[0, 6] = a_sc
-        X[0, 7] = a_sc
-        X[0, 8] = a_cc
-        X[0, 9] = a_cc
-        X[0, 10] = diff_exp
-        X[0, 11] = line_val
-        X[0, 12] = diff_exp + line_val
-        X[0, 13] = 5.0
-        X[0, 14] = h_sc + a_sc
-        X[0, 15] = 0.45
-        X[0, 16] = (1.0 / home_odds) if home_odds > 1.0 else 0.50
-        X[0, 17] = X[0, 16] - 0.50
-        X[0, 18] = 0.0
-        X[0, 19] = 0.0
-        X[0, 20] = diff_exp
-        X[0, 21] = diff_exp
+        if home_odds > 1.05 and away_odds <= 1.05:
+            away_odds = round(1.0 / max(0.04, target_vig - (1.0 / home_odds)), 2)
+        elif away_odds > 1.05 and home_odds <= 1.05:
+            home_odds = round(1.0 / max(0.04, target_vig - (1.0 / away_odds)), 2)
+
+        bundle = mgr.models.get("fifa_asian_handicap")
+        if isinstance(bundle, dict):
+            model_obj = bundle.get("model")
+            calibrator_obj = bundle.get("calibrator")
+            feat_names = bundle.get("feature_names", AH_FEATURE_COLUMNS)
+        else:
+            model_obj = bundle
+            calibrator_obj = None
+            feat_names = AH_FEATURE_COLUMNS
+
+        # Dynamic point-in-time player profile extraction from Database & API ground truth
+        mgr.refresh_player_stats()
+        hp = mgr.get_player_profile("fifa", h_player, client=client)
+        ap = mgr.get_player_profile("fifa", a_player, client=client)
+
+        h_sc_5, h_cc_5 = hp['sc_5'], hp['cc_5']
+        h_sc_10, h_cc_10 = hp['sc_10'], hp['cc_10']
+        a_sc_5, a_cc_5 = ap['sc_5'], ap['cc_5']
+        a_sc_10, a_cc_10 = ap['sc_10'], ap['cc_10']
+
+        diff_exp = (h_sc_10 - h_cc_10) - (a_sc_10 - a_cc_10)
+        exp_tot = (h_sc_10 + a_cc_10) / 2.0 + (a_sc_10 + h_cc_10) / 2.0
+        h2h_cnt, _, h2h_mean_comb, _ = mgr.get_h2h_stats("fifa", h_player, a_player, exp_tot, client=client)
+
+        # Cross-market Moneyline arbitrage features
+        ml = odds_dict.get("money_line", odds_dict.get("draw_no_bet", {})) if isinstance(odds_dict.get("money_line", odds_dict.get("draw_no_bet", {})), dict) else {}
+        ml_h_odds = float(ml.get("home", 0.0))
+        ml_a_odds = float(ml.get("away", 0.0))
+        if ml_h_odds > 1.0 and ml_a_odds > 1.0:
+            ml_imp_h = 1.0 / ml_h_odds
+            ml_imp_a = 1.0 / ml_a_odds
+        else:
+            ml_imp_h = hp['win_rate_10']
+            ml_imp_a = ap['win_rate_10']
+
+        ml_diff = ml_imp_h - ml_imp_a
+        imp_p_home = (1.0 / home_odds) if home_odds > 1.0 else 0.50
+        cross_div = ml_diff - (imp_p_home - 0.50)
+
+        # 23-feature vector aligned strictly with AH_FEATURE_COLUMNS
+        feat_vec = {
+            'is_reliable_5': 1.0 if (hp['reliable_5'] and ap['reliable_5']) else 0.0,
+            'is_reliable_10': 1.0 if (hp['reliable_10'] and ap['reliable_10']) else 0.0,
+            'home_scored_roll_mean_5': h_sc_5,
+            'home_scored_roll_mean_10': h_sc_10,
+            'home_conceded_roll_mean_5': h_cc_5,
+            'home_conceded_roll_mean_10': h_cc_10,
+            'away_scored_roll_mean_5': a_sc_5,
+            'away_scored_roll_mean_10': a_sc_10,
+            'away_conceded_roll_mean_5': a_cc_5,
+            'away_conceded_roll_mean_10': a_cc_10,
+            'home_net_gd_10': h_sc_10 - h_cc_10,
+            'away_net_gd_10': a_sc_10 - a_cc_10,
+            'net_gd_diff_10': diff_exp,
+            'net_gd_margin_vs_line': diff_exp + line_val,
+            'handicap_line_value': line_val,
+            'ml_implied_prob_home': ml_imp_h,
+            'ml_implied_prob_away': ml_imp_a,
+            'ml_implied_diff': ml_diff,
+            'ah_odds_implied_prob': imp_p_home,
+            'cross_market_divergence': cross_div,
+            'h2h_matches_count': h2h_cnt,
+            'h2h_mean_combined_goals': h2h_mean_comb if h2h_cnt > 0 else exp_tot,
+            'ht_ft_goal_ratio_league': 0.45,
+        }
+
+        if model_obj is None:
+            logger.warning("FIFA AH production model bundle not loaded; skipping evaluation.")
+            return None
 
         try:
-            if model_obj is not None:
-                probs = model_obj.predict_proba(X)[0]
-                p_home = float(probs[1])
+            df_feats = pd.DataFrame([feat_vec])
+            if feat_names:
+                cols_to_use = [c for c in feat_names if c in df_feats.columns]
+                df_feats = df_feats[cols_to_use]
+
+            if hasattr(model_obj, "predict_probs"):
+                raw_p = float(model_obj.predict_probs(df_feats)[0])
+            elif hasattr(model_obj, "predict_proba"):
+                raw_p = float(model_obj.predict_proba(df_feats)[0, 1])
+            elif hasattr(model_obj, "model") and hasattr(model_obj.model, "predict_proba"):
+                raw_p = float(model_obj.model.predict_proba(df_feats)[0, 1])
             else:
-                p_home = 1.0 / (1.0 + np.exp(-(diff_exp + line_val)))
-        except Exception:
-            p_home = 1.0 / (1.0 + np.exp(-(diff_exp + line_val)))
+                logger.error("FIFA AH model has no valid predict method; rejecting evaluation.")
+                return None
+
+            if calibrator_obj is not None:
+                p_home = float(calibrator_obj.predict([raw_p])[0])
+            else:
+                p_home = raw_p
+        except Exception as eval_err:
+            logger.warning(f"FIFA AH model inference error ({eval_err}); rejecting evaluation.")
+            return None
 
         p_away = 1.0 - p_home
         imp_home = (1.0 / home_odds) if home_odds > 1.0 else 1.0
@@ -415,8 +692,18 @@ def evaluate_market_opportunity(
         edge_home = p_home - imp_home
         edge_away = p_away - imp_away
 
-        if edge_home >= min_edge and edge_home >= edge_away and home_odds >= min_odds:
-            line_str = f"{line_val:+.1f}" if line_val != 0 else "-0.5"
+        def _format_ah_line(val: float) -> str:
+            if abs(val) < 1e-4:
+                return "0.0"
+            if abs(val * 4 - round(val * 4)) < 1e-4 and abs(val * 2 - round(val * 2)) >= 1e-4:
+                return f"{val:+.2f}"
+            return f"{val:+.1f}"
+
+        # Enforce strict 5.0% edge threshold for FIFA Asian Handicap (matching server shadow telemetry)
+        effective_min_edge = max(min_edge, 0.05)
+
+        if edge_home >= effective_min_edge and edge_home >= edge_away and home_odds >= min_odds:
+            line_str = _format_ah_line(line_val)
             return {
                 "side": "home",
                 "line": line_val,
@@ -425,9 +712,9 @@ def evaluate_market_opportunity(
                 "prob_str": f"{p_home*100:.1f}%",
                 "edge_str": f"{edge_home*100:+.1f}%"
             }
-        elif edge_away >= min_edge and edge_away > edge_home and away_odds >= min_odds:
+        elif edge_away >= effective_min_edge and edge_away > edge_home and away_odds >= min_odds:
             away_line = -line_val
-            away_line_str = f"{away_line:+.1f}" if away_line != 0 else "+0.5"
+            away_line_str = _format_ah_line(away_line)
             return {
                 "side": "away",
                 "line": away_line,
@@ -2753,7 +3040,7 @@ def run_live_publisher_cycle(bot_token: Optional[str] = None):
                 continue
 
             MIN_ODDS = 1.60
-            MIN_EDGE = 0.02
+            MIN_EDGE = 0.05 if m_key == "fifa_asian_handicap" else 0.02
 
             # Run Real ML Production Model Evaluation
             opp = evaluate_market_opportunity(
@@ -2765,7 +3052,8 @@ def run_live_publisher_cycle(bot_token: Optional[str] = None):
                 home_team=home_team,
                 away_team=away_team,
                 min_odds=MIN_ODDS,
-                min_edge=MIN_EDGE
+                min_edge=MIN_EDGE,
+                client=client
             )
 
             if not opp:
