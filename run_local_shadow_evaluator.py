@@ -450,7 +450,7 @@ class ReevaluatedModelManager:
             return 20.0
         if "4x4" in combined:
             return 16.0
-        return 20.0 if (sport == "ebasket" or "ebasket" in combined) else 8.0
+        return 25.0 if (sport == "ebasket" or "ebasket" in combined) else 15.0
 
     def get_player_stats(self, sport: str, player: str) -> Tuple[float, float, bool]:
         prof = self.get_player_profile(sport, player)
@@ -1034,7 +1034,7 @@ def fetch_scores_for_pending_shadow_matches():
         FROM core.shadow_tips_eval s
         LEFT JOIN core.matches m ON s.match_id = m.match_id
         WHERE s.status = 'PENDING'
-          AND NOW() >= (s.kickoff_at_utc + (INTERVAL '1 minute' * COALESCE(m.duration_minutes, CASE WHEN s.sport = 'ebasket' THEN 20 ELSE 8 END)))
+          AND NOW() >= (s.kickoff_at_utc + (INTERVAL '1 minute' * CASE WHEN s.sport = 'ebasket' THEN 25 ELSE 15 END))
         ORDER BY s.kickoff_at_utc DESC
         LIMIT 50;
     """)
