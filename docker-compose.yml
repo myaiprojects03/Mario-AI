@@ -27,6 +27,7 @@ services:
       - RUN_EMBEDDED_DASHBOARD=false
     volumes:
       - ./core:/app/core
+      - ./production_models:/app/production_models
     command: ["python", "-m", "core.live_publisher"]
 
   dashboard:
