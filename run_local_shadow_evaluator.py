@@ -624,7 +624,15 @@ class ReevaluatedModelManager:
                 return None
 
             vig = (imp_p_h + imp_p_a) - 1.0 if (imp_p_h + imp_p_a) > 1.0 else abs(imp_p_h + imp_p_a - 1.0)
-            ratio = imp_p_h / imp_p_a if imp_p_a > 0 else 1.0
+            ratio = imp_p_h / (imp_p_h + imp_p_a) if (imp_p_h + imp_p_a) > 0 else 0.50
+
+            leg_avg = self.league_averages.get(sport, (55.0, 55.0))
+            def_sc = float((leg_avg[0] + leg_avg[1]) / 2.0)
+            h_bayes = h_sc if hp['reliable_5'] else def_sc
+            a_bayes = a_sc if ap['reliable_5'] else def_sc
+            b_diff = h_bayes - a_bayes
+            b_std = 10.0
+
             feat_vec = {
                 'is_reliable_5': 1.0 if (hp['reliable_5'] and ap['reliable_5']) else 0.0,
                 'is_reliable_10': 1.0 if (hp['reliable_10'] and ap['reliable_10']) else 0.0,
@@ -638,10 +646,10 @@ class ReevaluatedModelManager:
                 'home_form_streak': hp['form_streak'], 'away_form_streak': ap['form_streak'],
                 'h2h_matches_count': h2h_cnt, 'h2h_win_rate_a': h2h_win_a, 'h2h_mean_point_diff': h2h_mean_diff,
                 'odds_implied_prob_home': imp_p_h, 'odds_implied_prob_away': imp_p_a,
-                'market_vig': vig, 'implied_prob_ratio': ratio, 'implied_vs_hist_divergence': imp_p_h - hp['win_rate_10'],
-                'home_bayesian_rating_mean': hp['bayesian_mean'], 'home_bayesian_rating_std': hp['bayesian_std'],
-                'away_bayesian_rating_mean': ap['bayesian_mean'], 'away_bayesian_rating_std': ap['bayesian_std'],
-                'bayesian_rating_diff': hp['bayesian_mean'] - ap['bayesian_mean'], 'hour_of_day_utc': hour_val
+                'market_vig': vig, 'implied_prob_ratio': ratio, 'implied_vs_hist_divergence': ratio - hp['win_rate_10'],
+                'home_bayesian_rating_mean': h_bayes, 'home_bayesian_rating_std': b_std,
+                'away_bayesian_rating_mean': a_bayes, 'away_bayesian_rating_std': b_std,
+                'bayesian_rating_diff': b_diff, 'hour_of_day_utc': hour_val
             }
 
         elif ch_key == "ebasket_ou":
@@ -662,11 +670,23 @@ class ReevaluatedModelManager:
             else:
                 return None
 
-            exp_pts_5 = (h_sc_5 + a_cc_5) / 2.0 + (a_sc_5 + h_cc_5) / 2.0
+            exp_pts_5 = h_sc_5 + a_sc_5
+            exp_pts_10 = h_sc + a_sc
             exp_conc_10 = h_cc + a_cc
-            blended = (exp_tot + exp_conc_10) / 2.0
+            blended = (exp_pts_10 + exp_conc_10) / 2.0
+            line_diff = blended - line_val
+
             vig = (imp_p_o + imp_p_u) - 1.0 if (imp_p_o + imp_p_u) > 1.0 else abs(imp_p_o + imp_p_u - 1.0)
-            ratio_o = imp_p_o / imp_p_u if imp_p_u > 0 else 1.0
+            norm_ratio_over = imp_p_o / (imp_p_o + imp_p_u) if (imp_p_o + imp_p_u) > 0 else 0.50
+
+            leg_avg = self.league_averages.get(sport, (55.0, 55.0))
+            def_sc = float((leg_avg[0] + leg_avg[1]) / 2.0)
+            h_bayes = h_sc if hp['reliable_5'] else def_sc
+            a_bayes = a_sc if ap['reliable_5'] else def_sc
+            b_tot = h_bayes + a_bayes
+            b_line_diff = b_tot - line_val
+            b_std = 10.0
+
             feat_vec = {
                 'is_reliable_5': 1.0 if (hp['reliable_5'] and ap['reliable_5']) else 0.0,
                 'is_reliable_10': 1.0 if (hp['reliable_10'] and ap['reliable_10']) else 0.0,
@@ -674,16 +694,16 @@ class ReevaluatedModelManager:
                 'home_conceded_roll_mean_5': h_cc_5, 'home_conceded_roll_mean_10': h_cc,
                 'away_scored_roll_mean_5': a_sc_5, 'away_scored_roll_mean_10': a_sc,
                 'away_conceded_roll_mean_5': a_cc_5, 'away_conceded_roll_mean_10': a_cc,
-                'expected_total_points_5': exp_pts_5, 'expected_total_points_10': exp_tot,
+                'expected_total_points_5': exp_pts_5, 'expected_total_points_10': exp_pts_10,
                 'expected_total_conceded_10': exp_conc_10, 'blended_projected_points_10': blended,
-                'ou_line_value': line_val, 'ou_line_diff_10': exp_tot - line_val,
+                'ou_line_value': line_val, 'ou_line_diff_10': line_diff,
                 'home_total_pts_std_10': hp['total_pts_std_10'], 'away_total_pts_std_10': ap['total_pts_std_10'],
                 'odds_implied_prob_over': imp_p_o, 'odds_implied_prob_under': imp_p_u,
-                'market_vig': vig, 'implied_prob_ratio_over': ratio_o,
-                'home_bayesian_rating_mean': hp['bayesian_mean'], 'home_bayesian_rating_std': hp['bayesian_std'],
-                'away_bayesian_rating_mean': ap['bayesian_mean'], 'away_bayesian_rating_std': ap['bayesian_std'],
-                'bayesian_total_points': exp_tot, 'bayesian_line_diff': exp_tot - line_val,
-                'h2h_matches_count': h2h_cnt, 'h2h_mean_total_score': h2h_mean_comb if h2h_cnt > 0 else exp_tot,
+                'market_vig': vig, 'implied_prob_ratio_over': norm_ratio_over,
+                'home_bayesian_rating_mean': h_bayes, 'home_bayesian_rating_std': b_std,
+                'away_bayesian_rating_mean': a_bayes, 'away_bayesian_rating_std': b_std,
+                'bayesian_total_points': b_tot, 'bayesian_line_diff': b_line_diff,
+                'h2h_matches_count': h2h_cnt, 'h2h_mean_total_score': h2h_mean_comb if h2h_cnt > 0 else exp_pts_10,
                 'hour_of_day_utc': hour_val
             }
 
