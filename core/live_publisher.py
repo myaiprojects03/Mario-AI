@@ -127,7 +127,7 @@ class ProductionModelManager:
         model_candidates = {
             "fifa_goals_ou": ["fifa_goals_ou_model_final.joblib"],
             "fifa_asian_handicap": ["fifa_asian_handicap_model_final.joblib"],
-            "fifa_money_line": ["fifa_money_line_model_final.joblib", "fifa_money_line_model_v3.0.0.joblib"],
+            "fifa_money_line": ["fifa_money_line_model_final.joblib"],
             "ebasket_money_line": ["ebasket_money_line_model_final.joblib"],
             "ebasket_ou": ["ebasket_ou_model_final.joblib", "ebasket_ou_model_v3.0.0.joblib"],
         }
