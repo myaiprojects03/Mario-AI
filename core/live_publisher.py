@@ -44,12 +44,26 @@ try:
     from markets.fifa_asian_handicap.features import AH_FEATURE_COLUMNS, build_fifa_asian_handicap_features
     from markets.fifa_asian_handicap.v3_multiline_kelly_filtering.features import build_fifa_ah_v3_features
     from markets.fifa_money_line.v3_dnb_synthetic_features.features import build_fifa_ml_v3_features
+    from markets.ebasket_money_line.features import FEATURE_COLUMNS as EBASKET_ML_FEATURE_COLUMNS
     from markets.ebasket_money_line.v3_dnb_synthetic_features.features import build_ebasket_ml_v3_features
     from markets.ebasket_ou.v3_multiline_kelly_filtering.features import build_ebasket_ou_v3_features
     from markets._shared.multiline_v3_features import calculate_quarter_kelly_stake
 except ImportError:
     build_fifa_goals_ou_features = None
     AH_FEATURE_COLUMNS = []
+    EBASKET_ML_FEATURE_COLUMNS = [
+        "is_reliable_5", "is_reliable_10", "home_win_rate_roll_5", "home_win_rate_roll_10",
+        "away_win_rate_roll_5", "away_win_rate_roll_10", "win_rate_diff_10",
+        "home_points_scored_roll_10", "home_points_conceded_roll_10",
+        "away_points_scored_roll_10", "away_points_conceded_roll_10",
+        "home_net_point_diff_10", "away_net_point_diff_10", "net_point_diff_delta_10",
+        "home_form_streak", "away_form_streak", "h2h_matches_count", "h2h_win_rate_a",
+        "h2h_mean_point_diff", "odds_implied_prob_home", "odds_implied_prob_away",
+        "market_vig", "implied_prob_ratio", "implied_vs_hist_divergence",
+        "home_bayesian_rating_mean", "home_bayesian_rating_std",
+        "away_bayesian_rating_mean", "away_bayesian_rating_std",
+        "bayesian_rating_diff", "hour_of_day_utc"
+    ]
     build_fifa_asian_handicap_features = None
     build_fifa_ah_v3_features = None
     build_fifa_ml_v3_features = None
@@ -223,10 +237,11 @@ class ProductionModelManager:
         hist = list(self.player_history.get((sport, p_clean), []))
 
         # Dynamic API Ground-Truth: If player has fewer than 3 matches in DB, query JarvisBet API history feed
+        endpoint = "/history/ebasket/pre" if sport == "ebasket" else "/history/pre"
         if (not hist or len(hist) < 3) and client is not None:
             try:
                 for param_k in ["homeName", "awayName"]:
-                    resp = client._execute_request("GET", "/history/pre", params={param_k: p_clean})
+                    resp = client._execute_request("GET", endpoint, params={param_k: p_clean})
                     if resp.status_code == 200:
                         for hm in (resp.json() or []):
                             h_obj = hm.get("home", {}) if isinstance(hm.get("home"), dict) else {}
@@ -247,8 +262,8 @@ class ProductionModelManager:
                 pass
 
         # Dynamic empirical database baselines (populated from core.results ground truth)
-        leg_avg = self.league_averages.get(sport, (2.57, 2.59) if sport == "fifa" else (55.0, 55.0))
-        def_win_rate = self.league_win_rates.get(sport, 0.396 if sport == "fifa" else 0.45)
+        leg_avg = self.league_averages.get(sport, (2.57, 2.59) if sport == "fifa" else (55.75, 55.67))
+        def_win_rate = self.league_win_rates.get(sport, 0.396 if sport == "fifa" else 0.495)
         def_sc = float(leg_avg[0])
         def_cc = float(leg_avg[1])
 
@@ -257,6 +272,7 @@ class ProductionModelManager:
                 'sc_5': def_sc, 'sc_10': def_sc,
                 'cc_5': def_cc, 'cc_10': def_cc,
                 'win_rate_5': def_win_rate, 'win_rate_10': def_win_rate,
+                'form_streak': 0.0,
                 'reliable_5': False, 'reliable_10': False,
                 'matches_count': len(hist), 'history': hist
             }
@@ -270,11 +286,22 @@ class ProductionModelManager:
         cc_10 = float(np.mean([x[1] for x in last_10]))
         w_10 = sum(1 for x in last_10 if x[2] == 1) / len(last_10)
 
+        # Form streak: count consecutive wins (+) or losses (-)
+        streak = 0
+        for x in reversed(hist):
+            if streak == 0:
+                streak = x[2]
+            elif (streak > 0 and x[2] == 1) or (streak < 0 and x[2] == -1):
+                streak += x[2]
+            else:
+                break
+
         return {
             'sc_5': sc_5, 'sc_10': sc_10,
             'cc_5': cc_5, 'cc_10': cc_10,
             'win_rate_5': sum(1 for x in last_5 if x[2] == 1) / len(last_5),
             'win_rate_10': w_10,
+            'form_streak': float(streak),
             'reliable_5': len(hist) >= 3,
             'reliable_10': len(hist) >= 5,
             'matches_count': len(hist),
@@ -292,7 +319,8 @@ class ProductionModelManager:
         # Dynamic API Ground-Truth: If no H2H in DB, query API feed
         if not all_m and client is not None:
             try:
-                resp = client._execute_request("GET", "/history/pre", params={"homeName": p1_clean})
+                endpoint = "/history/ebasket/pre" if sport == "ebasket" else "/history/pre"
+                resp = client._execute_request("GET", endpoint, params={"homeName": p1_clean})
                 if resp.status_code == 200:
                     for hm in (resp.json() or []):
                         h_name = str(hm.get("home", {}).get("name", "")).strip().lower()
@@ -313,7 +341,7 @@ class ProductionModelManager:
             except Exception:
                 pass
 
-        def_away_win = self.league_win_rates.get(sport, 0.396 if sport == "fifa" else 0.45)
+        def_away_win = self.league_win_rates.get(sport, 0.396 if sport == "fifa" else 0.495)
         if not all_m:
             return 0.0, def_away_win, default_exp_tot, 0.0
 
@@ -820,57 +848,135 @@ def evaluate_market_opportunity(
         home_odds = float(ml.get("home", 0.0))
         away_odds = float(ml.get("away", 0.0))
 
-        if home_odds <= 1.0 and away_odds <= 1.0:
+        if home_odds <= 1.05 and away_odds <= 1.05:
             return None
 
-        model_obj = mgr.models.get("ebasket_money_line")
+        # Derive true market vig dynamically from offered odds
+        if home_odds > 1.0 and away_odds > 1.0:
+            target_vig = (1.0 / home_odds) + (1.0 / away_odds)
+        else:
+            target_vig = 1.05
 
-        h_wr = 0.50 + np.clip(diff_exp / 25.0, -0.35, 0.35)
-        a_wr = 1.0 - h_wr
+        if home_odds > 1.05 and away_odds <= 1.05:
+            away_odds = round(1.0 / max(0.04, target_vig - (1.0 / home_odds)), 2)
+        elif away_odds > 1.05 and home_odds <= 1.05:
+            home_odds = round(1.0 / max(0.04, target_vig - (1.0 / away_odds)), 2)
 
-        X = np.zeros((1, 24), dtype=float)
-        X[0, 0] = 1.0
-        X[0, 1] = 1.0
-        X[0, 2] = h_wr
-        X[0, 3] = h_wr
-        X[0, 4] = a_wr
-        X[0, 5] = a_wr
-        X[0, 6] = diff_exp
-        X[0, 7] = 12.0
-        X[0, 8] = 5.0
-        X[0, 9] = a_wr
-        X[0, 10] = diff_exp
-        X[0, 11] = (1.0 / home_odds) if home_odds > 1.0 else 0.50
-        X[0, 12] = X[0, 11] - h_wr
-        X[0, 13] = 0.0
-        X[0, 14] = 0.0
-        X[0, 15] = h_sc
-        X[0, 16] = 5.0
-        X[0, 17] = a_sc
-        X[0, 18] = 5.0
-        X[0, 19] = h_sc - a_sc
-        X[0, 20] = h_wr - a_wr
-        X[0, 21] = h_wr - a_wr
-        X[0, 22] = diff_exp
-        X[0, 23] = 0.0
+        bundle = mgr.models.get("ebasket_money_line")
+        if isinstance(bundle, dict):
+            model_obj = bundle.get("model")
+            calibrator_obj = bundle.get("calibrator")
+            feat_names = bundle.get("feature_names", EBASKET_ML_FEATURE_COLUMNS)
+        else:
+            model_obj = bundle
+            calibrator_obj = None
+            feat_names = EBASKET_ML_FEATURE_COLUMNS
+
+        if model_obj is None:
+            logger.warning("eBasket ML production model bundle not loaded; skipping evaluation.")
+            return None
+
+        # Dynamic point-in-time player profile extraction from Database & API ground truth
+        mgr.refresh_player_stats()
+        hp = mgr.get_player_profile("ebasket", h_player, client=client)
+        ap = mgr.get_player_profile("ebasket", a_player, client=client)
+
+        h_sc = hp['sc_10']
+        h_cc = hp['cc_10']
+        a_sc = ap['sc_10']
+        a_cc = ap['cc_10']
+
+        diff_exp = (h_sc - h_cc) - (a_sc - a_cc)
+        exp_tot = (h_sc + a_cc) / 2.0 + (a_sc + h_cc) / 2.0
+        h2h_cnt, h2h_win_a, h2h_mean_comb, h2h_mean_diff = mgr.get_h2h_stats("ebasket", h_player, a_player, exp_tot, client=client)
+
+        imp_p_h = (1.0 / home_odds) if home_odds > 1.0 else 0.50
+        imp_p_a = (1.0 / away_odds) if away_odds > 1.0 else 0.50
+        vig = (imp_p_h + imp_p_a) - 1.0 if (imp_p_h + imp_p_a) > 1.0 else abs(imp_p_h + imp_p_a - 1.0)
+        ratio = imp_p_h / (imp_p_h + imp_p_a) if (imp_p_h + imp_p_a) > 0 else 0.50
+
+        leg_avg = mgr.league_averages.get("ebasket", (55.75, 55.67))
+        def_sc = float((leg_avg[0] + leg_avg[1]) / 2.0)
+        h_bayes = h_sc if hp['reliable_5'] else def_sc
+        a_bayes = a_sc if ap['reliable_5'] else def_sc
+        b_diff = h_bayes - a_bayes
+        b_std = 10.0
+
+        s_at = match.get("startedAt", "")
+        try:
+            s_dt = datetime.fromisoformat(s_at.replace("Z", "+00:00"))
+            hour_val = float(s_dt.hour)
+        except Exception:
+            hour_val = float(datetime.now(timezone.utc).hour)
+
+        # 30-feature vector strictly aligned with ebasket_money_line model bundle
+        feat_vec = {
+            'is_reliable_5': 1.0 if (hp['reliable_5'] and ap['reliable_5']) else 0.0,
+            'is_reliable_10': 1.0 if (hp['reliable_10'] and ap['reliable_10']) else 0.0,
+            'home_win_rate_roll_5': float(hp['win_rate_5']),
+            'home_win_rate_roll_10': float(hp['win_rate_10']),
+            'away_win_rate_roll_5': float(ap['win_rate_5']),
+            'away_win_rate_roll_10': float(ap['win_rate_10']),
+            'win_rate_diff_10': float(hp['win_rate_10'] - ap['win_rate_10']),
+            'home_points_scored_roll_10': float(h_sc),
+            'home_points_conceded_roll_10': float(h_cc),
+            'away_points_scored_roll_10': float(a_sc),
+            'away_points_conceded_roll_10': float(a_cc),
+            'home_net_point_diff_10': float(h_sc - h_cc),
+            'away_net_point_diff_10': float(a_sc - a_cc),
+            'net_point_diff_delta_10': float(diff_exp),
+            'home_form_streak': float(hp.get('form_streak', 0.0)),
+            'away_form_streak': float(ap.get('form_streak', 0.0)),
+            'h2h_matches_count': float(h2h_cnt),
+            'h2h_win_rate_a': float(h2h_win_a),
+            'h2h_mean_point_diff': float(h2h_mean_diff),
+            'odds_implied_prob_home': float(imp_p_h),
+            'odds_implied_prob_away': float(imp_p_a),
+            'market_vig': float(vig),
+            'implied_prob_ratio': float(ratio),
+            'implied_vs_hist_divergence': float(ratio - hp['win_rate_10']),
+            'home_bayesian_rating_mean': float(h_bayes),
+            'home_bayesian_rating_std': float(b_std),
+            'away_bayesian_rating_mean': float(a_bayes),
+            'away_bayesian_rating_std': float(b_std),
+            'bayesian_rating_diff': float(b_diff),
+            'hour_of_day_utc': float(hour_val)
+        }
 
         try:
-            if model_obj is not None:
-                probs = model_obj.predict_proba(X)[0]
-                p_home = float(probs[1])
+            df_feats = pd.DataFrame([feat_vec])
+            if feat_names:
+                cols_to_use = [c for c in feat_names if c in df_feats.columns]
+                df_feats = df_feats[cols_to_use]
+
+            if hasattr(model_obj, "predict_probs"):
+                raw_p = float(model_obj.predict_probs(df_feats)[0])
+            elif hasattr(model_obj, "predict_proba"):
+                raw_p = float(model_obj.predict_proba(df_feats)[0, 1])
+            elif hasattr(model_obj, "model") and hasattr(model_obj.model, "predict_proba"):
+                raw_p = float(model_obj.model.predict_proba(df_feats)[0, 1])
             else:
-                p_home = 1.0 / (1.0 + np.exp(-diff_exp / 10.0))
-        except Exception:
-            p_home = 1.0 / (1.0 + np.exp(-diff_exp / 10.0))
+                logger.error("eBasket ML model has no valid predict method; rejecting evaluation.")
+                return None
+
+            if calibrator_obj is not None:
+                p_home = float(calibrator_obj.predict([raw_p])[0])
+            else:
+                p_home = raw_p
+        except Exception as eval_err:
+            logger.warning(f"eBasket ML model inference error ({eval_err}); rejecting evaluation.")
+            return None
 
         p_away = 1.0 - p_home
-        imp_home = (1.0 / home_odds) if home_odds > 1.0 else 1.0
-        imp_away = (1.0 / away_odds) if away_odds > 1.0 else 1.0
+        imp_home = imp_p_h
+        imp_away = imp_p_a
 
         edge_home = p_home - imp_home
         edge_away = p_away - imp_away
 
-        if edge_home >= min_edge and edge_home >= edge_away and home_odds >= min_odds:
+        effective_min_edge = max(min_edge, 0.02)
+
+        if edge_home >= effective_min_edge and edge_home >= edge_away and home_odds >= min_odds:
             return {
                 "side": "home",
                 "line": 0.0,
@@ -879,7 +985,7 @@ def evaluate_market_opportunity(
                 "prob_str": f"{p_home*100:.1f}%",
                 "edge_str": f"{edge_home*100:+.1f}%"
             }
-        elif edge_away >= min_edge and edge_away > edge_home and away_odds >= min_odds:
+        elif edge_away >= effective_min_edge and edge_away > edge_home and away_odds >= min_odds:
             return {
                 "side": "away",
                 "line": 0.0,
